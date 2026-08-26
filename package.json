@@ -1,0 +1,7 @@
+{
+  "name": "us-market-pro",
+  "version": "3.0.0",
+  "private": true,
+  "description": "منصة فلاتر السوق الأمريكي + تقييم عقود الأوبشن الأسبوعية",
+  "engines": { "node": ">=18" }
+}
