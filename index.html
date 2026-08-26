@@ -2,1274 +2,14 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0">
-<title>US MARKET PRO — فلاتر + تحليل زمني + تنبؤ + أوبشن أسبوعي</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
+<meta name="theme-color" content="#04060e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>US MARKET PRO | فلاتر متقدمة + الأوبشن الأسبوعي</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lightweight-charts/4.1.0/lightweight-charts.standalone.production.js"></script>
 <script>if(typeof LightweightCharts==='undefined'){document.write('<scr'+'ipt src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"><\/scr'+'ipt>')}</script>
-<script>
-/* ══════════════════════════════════════════════════════════════════════════
-   ⚙️ KSAEngine — محرّك التحليل المدمج (نسخة مستقلة داخل الملف)
-   ──────────────────────────────────────────────────────────────────────────
-   هذا المحرّك يُعرَّف فقط إذا لم يكن /engine/core.js محمّلاً بالفعل، حتى لا
-   يتعارض مع نسخة خارجية إن وُجدت لاحقاً.
-
-   قاعدة عامة في كل دوال هذا الملف: حين لا تكفي البيانات لإصدار رقم ذي معنى
-   تُعيد الدالة {ok:false, reason} بدل رقم مُخترع. الامتناع عن الحكم نتيجة،
-   لا عطل.
-   ══════════════════════════════════════════════════════════════════════════ */
-(function () {
-if (typeof window !== 'undefined' && window.KSAEngine) return; /* نسخة خارجية محمّلة — لا نتعارض معها */
-
-const E = {};
-
-
-
-
-
-/* ══ 0) أدوات إحصائية ═══════════════════════════════════════════════════ */
-
-const Stats = {
-  mean(a) { if (!a || !a.length) return 0; let s = 0; for (const v of a) s += v; return s / a.length; },
-
-  /** الانحراف المعياري للعيّنة (قسمة على n−1 لا n) */
-  sd(a) {
-    if (!a || a.length < 2) return 0;
-    const m = Stats.mean(a); let s = 0;
-    for (const v of a) s += (v - m) ** 2;
-    return Math.sqrt(s / (a.length - 1));
-  },
-
-  /** المئين بالاستيفاء الخطي */
-  quantile(a, q) {
-    if (!a || !a.length) return 0;
-    const s = [...a].sort((x, y) => x - y);
-    const pos = (s.length - 1) * q, lo = Math.floor(pos), hi = Math.ceil(pos);
-    return lo === hi ? s[lo] : s[lo] + (s[hi] - s[lo]) * (pos - lo);
-  },
-
-  median(a) { return Stats.quantile(a, 0.5); },
-
-  /** انحدار خطي على الفهرس 0..n−1 — يعيد الميل والتقاطع وR² وإحصاءة t للميل */
-  linreg(y) {
-    const n = y?.length || 0;
-    if (n < 3) return { slope: 0, intercept: n ? y[0] : 0, r2: 0, tStat: 0, se: 0, n };
-    let sx = 0, sy = 0, sxy = 0, sxx = 0;
-    for (let i = 0; i < n; i++) { sx += i; sy += y[i]; sxy += i * y[i]; sxx += i * i; }
-    const d = n * sxx - sx * sx;
-    if (!d) return { slope: 0, intercept: Stats.mean(y), r2: 0, tStat: 0, se: 0, n };
-    const slope = (n * sxy - sx * sy) / d;
-    const intercept = (sy - slope * sx) / n;
-    const ym = sy / n;
-    let ssTot = 0, ssRes = 0;
-    for (let i = 0; i < n; i++) { const f = intercept + slope * i; ssTot += (y[i] - ym) ** 2; ssRes += (y[i] - f) ** 2; }
-    const r2 = ssTot ? 1 - ssRes / ssTot : 0;
-    const sigma2 = n > 2 ? ssRes / (n - 2) : 0;
-    const varSlope = sigma2 * n / d;
-    const se = Math.sqrt(Math.max(0, varSlope));
-    return { slope, intercept, r2: +r2.toFixed(4), tStat: se ? slope / se : 0, se, n };
-  },
-
-  /** دالة التوزيع التراكمي الطبيعي — تقريب Abramowitz & Stegun 7.1.26 */
-  normCDF(z) {
-    const s = z < 0 ? -1 : 1; z = Math.abs(z) / Math.SQRT2;
-    const t = 1 / (1 + 0.3275911 * z);
-    const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-z * z);
-    return 0.5 * (1 + s * y);
-  },
-  normPDF(z) { return Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI); },
-
-  /** p ثنائي الطرف من إحصاءة t — تقريب طبيعي عند df كبير، وإلا تصحيح بسيط */
-  tTestP(t, df) {
-    t = Math.abs(t);
-    if (!isFinite(t)) return 1;
-    if (df >= 30) return 2 * (1 - Stats.normCDF(t));
-    /* تصحيح Cornish-Fisher تقريبي لدرجات حرية صغيرة */
-    const z = t * (1 - 1 / (4 * df)) / Math.sqrt(1 + t * t / (2 * df));
-    return 2 * (1 - Stats.normCDF(z));
-  },
-
-  /** اختبار نسبتين (two-proportion z-test) — لمقارنة نسبة ربح الإشارة بخط الأساس */
-  twoPropP(x1, n1, x2, n2) {
-    if (!n1 || !n2) return 1;
-    const p1 = x1 / n1, p2 = x2 / n2, p = (x1 + x2) / (n1 + n2);
-    const se = Math.sqrt(p * (1 - p) * (1 / n1 + 1 / n2));
-    if (!se) return 1;
-    return 2 * (1 - Stats.normCDF(Math.abs(p1 - p2) / se));
-  },
-
-  /** فاصل ثقة Wilson لنسبة — أدقّ من الفاصل الطبيعي عند العيّنات الصغيرة */
-  wilsonCI(x, n, z = 1.96) {
-    if (!n) return [0, 0];
-    const p = x / n, d = 1 + z * z / n;
-    const c = (p + z * z / (2 * n)) / d;
-    const h = z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d;
-    return [+Math.max(0, (c - h) * 100).toFixed(1), +Math.min(100, (c + h) * 100).toFixed(1)];
-  },
-
-  /** تصحيح Benjamini-Hochberg لمعدّل الاكتشاف الكاذب — يعيد مصفوفة منطقية */
-  benjaminiHochberg(pvals, q = 0.10) {
-    const n = pvals.length, out = new Array(n).fill(false);
-    if (!n) return out;
-    const idx = pvals.map((p, i) => ({ p, i })).sort((a, b) => a.p - b.p);
-    let kMax = -1;
-    for (let k = 0; k < n; k++) if (idx[k].p <= (k + 1) / n * q) kMax = k;
-    for (let k = 0; k <= kMax; k++) out[idx[k].i] = true;
-    return out;
-  },
-
-  fmtP(p) {
-    if (p == null || !isFinite(p)) return '—';
-    if (p < 0.0001) return '< 0.0001';
-    return p.toFixed(4);
-  }
-};
-E.Stats = Stats;
-
-/* ══ 1) تقويم التداول ═══════════════════════════════════════════════════
-   السوق الأمريكي: الاثنين→الجمعة. العطل الرسمية غير مدرجة هنا لأن مصدرها
-   يتغيّر سنوياً؛ الأثر على حساب «عدد الجلسات» لا يتجاوز جلسة أو جلستين في
-   الأفق الأسبوعي، وهو معلن بدل أن يكون مخفياً.                            */
-
-const USMarket = {
-  isTradingDay(d) { const w = d.getDay(); return w >= 1 && w <= 5; },
-  addTradingDays(from, n) {
-    const d = new Date(from.getTime());
-    let left = Math.abs(n), step = n < 0 ? -1 : 1;
-    while (left > 0) { d.setDate(d.getDate() + step); if (USMarket.isTradingDay(d)) left--; }
-    return d;
-  },
-  tradingDaysBetween(a, b) {
-    if (b < a) return -USMarket.tradingDaysBetween(b, a);
-    const d = new Date(a.getFullYear(), a.getMonth(), a.getDate());
-    const end = new Date(b.getFullYear(), b.getMonth(), b.getDate());
-    let n = 0;
-    while (d < end) { d.setDate(d.getDate() + 1); if (USMarket.isTradingDay(d)) n++; }
-    return n;
-  },
-  nextTradingDay(d) { const x = new Date(d.getTime()); while (!USMarket.isTradingDay(x)) x.setDate(x.getDate() + 1); return x; },
-  /* السوق الأمريكي بلا حدّ تذبذب يومي — تُعاد null صراحةً بدل رقم وهمي.
-     (يوجد إيقاف مؤقت LULD لكنه ليس سقفاً ثابتاً على الإغلاق.) */
-  dailyLimits(price) { return { up: null, down: null, pct: null, note: 'لا يوجد حدّ تذبذب يومي ثابت في السوق الأمريكي — تُطبَّق مصدّات LULD المؤقتة أثناء الجلسة فقط' }; }
-};
-E.USMarket = USMarket;
-E.SaudiMarket = USMarket; /* توافق مع مواضع الاستدعاء القديمة — التقويم أمريكي */
-
-/* ══ 2) تنظيف الشموع وتدقيقها ══════════════════════════════════════════ */
-
-E.sanitizeCandles = function (raw) {
-  if (!Array.isArray(raw)) return [];
-  const out = [];
-  for (const c of raw) {
-    if (!c) continue;
-    const o = +c.open, h = +c.high, l = +c.low, cl = +c.close;
-    if (![o, h, l, cl].every(v => isFinite(v) && v > 0)) continue;
-    /* شمعة بمدى مقلوب بيانات فاسدة لا شمعة صحيحة */
-    if (h < l) continue;
-    out.push({
-      time: c.time, open: o, close: cl,
-      high: Math.max(h, o, cl), low: Math.min(l, o, cl),
-      volume: Math.max(0, +c.volume || 0)
-    });
-  }
-  return out;
-};
-
-E.auditCandles = function (cs) {
-  const issues = [];
-  if (!cs || cs.length < 30) issues.push(`عدد الشموع ${cs?.length || 0} — أقل من 30 جلسة، أي تحليل زمني عليها ضعيف`);
-  if (cs && cs.length) {
-    const zeroVol = cs.filter(c => !c.volume).length;
-    if (zeroVol > cs.length * 0.1) issues.push(`${zeroVol} جلسة بحجم صفر — مؤشرات الحجم غير موثوقة`);
-    let flat = 0;
-    for (const c of cs) if (c.high === c.low) flat++;
-    if (flat > cs.length * 0.05) issues.push(`${flat} جلسة بمدى صفري (سعر واحد) — قد تكون جلسات بلا تداول فعلي`);
-    let gaps = 0;
-    for (let i = 1; i < cs.length; i++) {
-      const j = Math.abs(cs[i].open - cs[i - 1].close) / cs[i - 1].close;
-      if (j > 0.2) gaps++;
-    }
-    if (gaps) issues.push(`${gaps} فجوة تتجاوز 20٪ — قد تكون تجزئة أسهم غير معدّلة`);
-  }
-  return { ok: issues.length === 0, issues };
-};
-
-/* ══ 3) مؤشرات أساسية ══════════════════════════════════════════════════ */
-
-E.atr = function (cs, p = 14) {
-  if (!cs || cs.length < p + 1) return null;
-  const tr = [];
-  for (let i = 1; i < cs.length; i++)
-    tr.push(Math.max(cs[i].high - cs[i].low, Math.abs(cs[i].high - cs[i - 1].close), Math.abs(cs[i].low - cs[i - 1].close)));
-  /* Wilder smoothing */
-  let a = Stats.mean(tr.slice(0, p));
-  for (let i = p; i < tr.length; i++) a = (a * (p - 1) + tr[i]) / p;
-  return +a.toFixed(4);
-};
-
-/** التذبذب من الانحراف المعياري للعوائد اللوغاريتمية — بوحدة معلومة (٪) */
-E.volatility = function (prices) {
-  if (!prices || prices.length < 21) return { ok: false, reason: 'أقل من 21 سعراً — التذبذب غير موثوق' };
-  const r = [];
-  for (let i = 1; i < prices.length; i++) {
-    if (prices[i - 1] > 0 && prices[i] > 0) r.push(Math.log(prices[i] / prices[i - 1]));
-  }
-  if (r.length < 20) return { ok: false, reason: 'عوائد غير كافية' };
-  const sd = Stats.sd(r);
-  const daily = sd * 100;
-  return {
-    ok: true,
-    dailyPct: +daily.toFixed(2),
-    annualPct: +(daily * Math.sqrt(252)).toFixed(1),
-    expectedDailyRangePct: +(daily * 1.128).toFixed(2), /* E|r| ≈ σ√(2/π) */
-    sampleSize: r.length
-  };
-};
-
-/** التذبذب المحقّق على نافذة (HV20 مثلاً) — نفس التعريف أعلاه على آخر n */
-E.realizedVol = function (prices, win = 20) {
-  if (!prices || prices.length < win + 1) return null;
-  const seg = prices.slice(-(win + 1));
-  const v = E.volatility(seg.length >= 21 ? seg : prices.slice(-21));
-  return v.ok ? v.annualPct : null;
-};
-
-/* ══ 4) المؤشرات التراكمية ═════════════════════════════════════════════ */
-
-const Cumulative = {
-  obv(cs) {
-    const out = [0];
-    for (let i = 1; i < cs.length; i++) {
-      const d = cs[i].close - cs[i - 1].close;
-      out.push(out[i - 1] + (d > 0 ? cs[i].volume : d < 0 ? -cs[i].volume : 0));
-    }
-    return out;
-  },
-  adLine(cs) {
-    const out = []; let acc = 0;
-    for (const c of cs) {
-      const rng = c.high - c.low;
-      const mfm = rng ? ((c.close - c.low) - (c.high - c.close)) / rng : 0;
-      acc += mfm * c.volume;
-      out.push(acc);
-    }
-    return out;
-  },
-  /** VWAP على نافذة متحرّكة — يعيد null قبل اكتمال النافذة بدل رقم ناقص */
-  rollingVWAP(cs, win = 20) {
-    const out = [];
-    for (let i = 0; i < cs.length; i++) {
-      if (i < win - 1) { out.push(null); continue; }
-      let pv = 0, v = 0;
-      for (let j = i - win + 1; j <= i; j++) {
-        const tp = (cs[j].high + cs[j].low + cs[j].close) / 3;
-        pv += tp * cs[j].volume; v += cs[j].volume;
-      }
-      out.push(v ? pv / v : cs[i].close);
-    }
-    return out;
-  },
-  /** VWAP مثبّت من نقطة ارتكاز — المرجع الحقيقي لمن دخل عند تلك النقطة */
-  anchoredVWAP(cs, anchorIdx) {
-    const out = new Array(cs.length).fill(null);
-    let pv = 0, v = 0;
-    for (let i = Math.max(0, anchorIdx); i < cs.length; i++) {
-      const tp = (cs[i].high + cs[i].low + cs[i].close) / 3;
-      pv += tp * cs[i].volume; v += cs[i].volume;
-      out[i] = v ? +(pv / v).toFixed(2) : cs[i].close;
-    }
-    return out;
-  },
-  /** تباعد بين السعر وسلسلة تراكمية على آخر lookback جلسة */
-  divergence(cs, series, lookback = 20) {
-    const n = cs.length;
-    if (n < lookback + 2) return { ok: false, reason: 'نافذة غير كافية' };
-    const p = cs.slice(-lookback).map(c => c.close);
-    const s = series.slice(-lookback);
-    const pr = Stats.linreg(p), sr = Stats.linreg(s);
-    const pNorm = pr.slope / (p[p.length - 1] || 1) * 100;
-    const sScale = Stats.median(s.map(Math.abs)) || 1;
-    const sNorm = sr.slope / sScale;
-    let type = 'none', label = 'لا تباعد واضح';
-    if (pNorm < -0.05 && sNorm > 0) { type = 'bullish'; label = 'تباعد إيجابي — السعر يهبط والتدفّق يصعد'; }
-    else if (pNorm > 0.05 && sNorm < 0) { type = 'bearish'; label = 'تباعد سلبي — السعر يصعد والتدفّق يهبط'; }
-    return { ok: true, type, label, priceSlopePct: +pNorm.toFixed(3), flowSlope: +sNorm.toFixed(4), lookback };
-  }
-};
-E.Cumulative = Cumulative;
-
-
-/* ══ 5) نقاط الارتكاز والدورات ══════════════════════════════════════════
-   الارتكاز «مؤكد» فقط بعد إغلاق k جلسة على كل جانب. هذا القيد هو ما يمنع
-   اكتشاف قيعان لم تتأكد بعد — وهو مصدر أشهر خطأ في التحليل الزمني.        */
-
-E.pivots = function (cs, k = 3) {
-  const out = [];
-  for (let i = k; i < cs.length - k; i++) {
-    let isH = true, isL = true;
-    for (let j = i - k; j <= i + k; j++) {
-      if (j === i) continue;
-      if (cs[j].high >= cs[i].high) isH = false;
-      if (cs[j].low <= cs[i].low) isL = false;
-    }
-    if (isH) out.push({ i, price: cs[i].high, type: 'H' });
-    if (isL) out.push({ i, price: cs[i].low, type: 'L' });
-  }
-  return out;
-};
-
-E.lastConfirmedPivot = function (cs, k = 3) {
-  if (!cs || cs.length < k * 2 + 2) return null;
-  const p = E.pivots(cs, k);
-  return p.length ? p[p.length - 1] : null;
-};
-
-/** الدورة المهيمنة من تباعد الارتكازات — مع تصريح صريح عن مدى ثباتها */
-E.dominantPivotCycle = function (cs, k = 3) {
-  const p = E.pivots(cs, k);
-  if (p.length < 4) return { cycle: null, reliable: false, consistency: 0, consistencyPct: 0, sampleSize: p.length };
-  const gaps = [];
-  for (let i = 1; i < p.length; i++) gaps.push(p[i].i - p[i - 1].i);
-  const med = Stats.median(gaps);
-  const sd = Stats.sd(gaps);
-  const cv = med ? sd / med : 1;           /* معامل الاختلاف */
-  const consistency = Math.max(0, 1 - cv);
-  return {
-    cycle: Math.round(med),
-    sampleSize: gaps.length,
-    consistency: +consistency.toFixed(3),
-    consistencyPct: +(consistency * 100).toFixed(1),
-    reliable: gaps.length >= 6 && cv < 0.35
-  };
-};
-
-/** هل لهذا السهم فعلاً ميل لانعطافات عند مسافات معيّنة؟ اختبار تبديل
-    (permutation) بدل افتراض أن أرقام غان/فيبوناتشي تعمل على كل سهم. */
-E.empiricalPivotCycles = function (cs, opt = {}) {
-  const perms = opt.permutations || 300, k = opt.k || 3;
-  const p = E.pivots(cs, k);
-  if (p.length < 8) return { ok: false, reason: `عدد الارتكازات ${p.length} — نحتاج 8 على الأقل لاختبار الدورات`, pivotCount: p.length };
-  const idx = p.map(x => x.i), n = cs.length;
-  const gaps = [];
-  for (let i = 1; i < idx.length; i++) gaps.push(idx[i] - idx[i - 1]);
-
-  const candidates = [];
-  const maxCycle = Math.min(90, Math.floor(n / 4));
-  for (let c = 5; c <= maxCycle; c++) {
-    const tol = Math.max(1, Math.round(c * 0.15));
-    const hits = gaps.filter(g => Math.abs(g - c) <= tol).length;
-    if (hits < 3) continue;
-    const observed = hits / gaps.length;
-    /* خط أساس: نفس عدد الارتكازات موزّعة عشوائياً على نفس الطول */
-    let ge = 0;
-    for (let t = 0; t < perms; t++) {
-      const rnd = [];
-      for (let j = 0; j < idx.length; j++) rnd.push(Math.floor(Math.random() * n));
-      rnd.sort((a, b) => a - b);
-      const rg = [];
-      for (let j = 1; j < rnd.length; j++) rg.push(rnd[j] - rnd[j - 1]);
-      const rh = rg.filter(g => Math.abs(g - c) <= tol).length / (rg.length || 1);
-      if (rh >= observed) ge++;
-    }
-    const pValue = (ge + 1) / (perms + 1);
-    const expected = Stats.mean([observed]) || 0;
-    const baseRate = (2 * tol + 1) / n;
-    const lift = baseRate ? observed / baseRate : 0;
-    if (pValue <= 0.10) candidates.push({ cycle: c, tolerance: tol, hits, pValue: +pValue.toFixed(4), lift: +lift.toFixed(2) });
-  }
-  if (!candidates.length)
-    return { ok: false, reason: 'لا توجد دورة ارتكاز تتفوّق على الصدفة عند هذا السهم', pivotCount: p.length, permutations: perms };
-
-  const pass = Stats.benjaminiHochberg(candidates.map(c => c.pValue), 0.10);
-  const kept = candidates.filter((c, i) => pass[i]).sort((a, b) => a.pValue - b.pValue).slice(0, 4);
-  if (!kept.length)
-    return { ok: false, reason: 'الدورات المرشّحة سقطت بعد تصحيح الاختبارات المتعددة', pivotCount: p.length, permutations: perms };
-
-  return {
-    ok: true, cycles: kept, pivotCount: p.length, permutations: perms,
-    note: 'الدورات أعلاه اجتازت اختبار تبديل عشوائي وتصحيح Benjamini-Hochberg عند 10٪'
-  };
-};
-
-/* ══ 6) التوافق الزمني والنوافذ ════════════════════════════════════════ */
-
-const FIB_BARS = [13, 21, 34, 55, 89, 144];
-const GANN_BARS = [30, 45, 90];
-const GANN_CAL_DAYS = [30, 45, 90, 120, 180, 270, 360];
-
-E.timeConfluence = function (cs, pivot) {
-  const n = cs.length;
-  const barsSince = n - 1 - pivot.i;
-  const days = Math.round(barsSince * 7 / 5); /* تقدير تقويمي من الجلسات */
-  const evidence = [];
-  for (const f of FIB_BARS) if (Math.abs(barsSince - f) <= 2) evidence.push({ kind: 'fib', value: f, label: `فيبوناتشي زمني ${f} جلسة (فرق ${Math.abs(barsSince - f)})` });
-  for (const g of GANN_BARS) if (Math.abs(barsSince - g) <= 2) evidence.push({ kind: 'gann', value: g, label: `دورة غان ${g} جلسة (فرق ${Math.abs(barsSince - g)})` });
-  const dc = E.dominantPivotCycle(cs, 3);
-  if (dc.cycle && Math.abs(barsSince - dc.cycle) <= Math.max(2, Math.round(dc.cycle * 0.12)))
-    evidence.push({ kind: 'own', value: dc.cycle, label: `دورة السهم الذاتية ${dc.cycle} جلسة (ثبات ${dc.consistencyPct}٪)` });
-  const total = FIB_BARS.length + GANN_BARS.length + 1;
-  return {
-    barsSincePivot: barsSince, daysSincePivot: days,
-    count: evidence.length, total, evidence,
-    label: evidence.length >= 2 ? 'توافق زمني متعدد' : evidence.length === 1 ? 'توافق زمني مفرد' : 'لا توافق زمني عند هذه المسافة'
-  };
-};
-
-/** النوافذ الزمنية القادمة — كل نافذة تحمل وحدتها صراحةً، والتحويل إلى
-    تاريخ يمرّ عبر تقويم تداول فعلي بدل جمع أيام تقويمية على أعمى. */
-E.timeWindows = function (cs, pivot, opt = {}) {
-  const horizonDays = opt.horizonDays || 240;
-  const n = cs.length, barsSince = n - 1 - pivot.i, out = [];
-  const today = new Date();
-
-  const pushBar = (target, kind, label) => {
-    const left = target - barsSince;
-    if (left < 0 || left > horizonDays) return;
-    const date = USMarket.addTradingDays(today, left);
-    out.push({ unit: 'bars', barsAhead: left, daysLeft: left, date, label, kind, shiftedFromWeekend: false });
-  };
-  for (const f of FIB_BARS) pushBar(f, 'fib', `فيبوناتشي ${f} جلسة من الارتكاز`);
-  for (const g of GANN_BARS) pushBar(g, 'gann', `غان ${g} جلسة من الارتكاز`);
-
-  const dc = E.dominantPivotCycle(cs, 3);
-  if (dc.cycle) {
-    for (let m = 1; m <= 3; m++) pushBar(dc.cycle * m, 'own', `دورة السهم الذاتية ×${m} (${dc.cycle * m} جلسة)`);
-  }
-
-  /* دورات غان التقويمية — تُزاح لأول جلسة تالية إن وقعت في عطلة نهاية أسبوع */
-  const daysSince = Math.round(barsSince * 7 / 5);
-  for (const g of GANN_CAL_DAYS) {
-    const left = g - daysSince;
-    if (left < 0 || left > horizonDays) continue;
-    let date = new Date(today.getTime()); date.setDate(date.getDate() + left);
-    const shifted = !USMarket.isTradingDay(date);
-    if (shifted) date = USMarket.nextTradingDay(date);
-    out.push({ unit: 'days', barsAhead: null, daysLeft: left, date, label: `غان تقويمي ${g} يوماً من الارتكاز`, kind: 'gannCal', shiftedFromWeekend: shifted });
-  }
-  return out.sort((a, b) => a.date - b.date);
-};
-
-/* ══ 7) التحليل الطيفي ═════════════════════════════════════════════════
-   DFT مباشر على العوائد المُنظّفة من الاتجاه. اختبار الدلالة هو اختبار
-   Fisher's g على الطيف الدوري — وليس z-score على طاقات الطيف نفسه، لأن
-   ذاك الأخير يصنّف مشياً عشوائياً محضاً كـ«دورة» في أغلب الحالات.          */
-
-function detrend(x) {
-  const r = Stats.linreg(x);
-  return x.map((v, i) => v - (r.intercept + r.slope * i));
-}
-
-function periodogram(x) {
-  const n = x.length, m = Math.floor(n / 2), out = [];
-  for (let k = 1; k <= m; k++) {
-    let re = 0, im = 0;
-    const w = 2 * Math.PI * k / n;
-    for (let t = 0; t < n; t++) { re += x[t] * Math.cos(w * t); im += x[t] * Math.sin(w * t); }
-    out.push({ k, freq: k / n, period: n / k, power: (re * re + im * im) / n });
-  }
-  return out;
-}
-
-/** p لاختبار Fisher's g — احتمال أن تنتج ذروة بهذه النسبة من ضجيج أبيض */
-function fisherG(powers) {
-  const N = powers.length;
-  const sum = powers.reduce((a, b) => a + b, 0);
-  if (!sum || N < 3) return { g: 0, p: 1 };
-  const g = Math.max(...powers) / sum;
-  /* P(g > x) = Σ_{j} (-1)^(j-1) C(N,j) (1-jx)^(N-1) — نأخذ الحدود الأولى */
-  let p = 0;
-  const jMax = Math.min(N, Math.floor(1 / g));
-  let logC = 0;
-  for (let j = 1; j <= jMax; j++) {
-    logC += Math.log((N - j + 1) / j);
-    const term = Math.exp(logC + (N - 1) * Math.log(Math.max(0, 1 - j * g)));
-    p += (j % 2 ? 1 : -1) * term;
-    if (!isFinite(p)) break;
-  }
-  return { g, p: Math.max(0, Math.min(1, p)) };
-}
-
-E.spectral = function (prices, opt = {}) {
-  const alpha = opt.alpha ?? 0.05;
-  if (!prices || prices.length < 64) return { ok: false, reason: `${prices?.length || 0} سعراً — التحليل الطيفي يحتاج 64 على الأقل` };
-  const rets = [];
-  for (let i = 1; i < prices.length; i++) rets.push(Math.log(prices[i] / prices[i - 1]));
-  const x = detrend(rets);
-  const pg = periodogram(x);
-  /* نُقصر البحث على دورات معقولة للتداول: 4→ثلث الطول */
-  const band = pg.filter(p => p.period >= 4 && p.period <= x.length / 3);
-  if (band.length < 3) return { ok: false, reason: 'نطاق الترددات ضيّق جداً على هذا الطول' };
-  const powers = band.map(b => b.power);
-  const { g, p } = fisherG(powers);
-  const top = [...band].sort((a, b) => b.power - a.power).slice(0, 5)
-    .map(b => ({ period: +b.period.toFixed(1), freq: +b.freq.toFixed(5), power: b.power }));
-  const best = band.reduce((a, b) => b.power > a.power ? b : a);
-  const totalPower = powers.reduce((a, b) => a + b, 0);
-  const significant = p <= alpha;
-  const trend = Stats.linreg(prices);
-  return {
-    ok: true, significant, pValue: +p.toFixed(5), pValueText: Stats.fmtP(p),
-    gStatistic: +g.toFixed(4),
-    period: +best.period.toFixed(1), freq: +best.freq.toFixed(5),
-    bandSharePct: +(best.power / totalPower * 100).toFixed(1),
-    snr: +(best.power / (totalPower / powers.length)).toFixed(2),
-    nCycles: +(x.length / best.period).toFixed(1),
-    trendR2: trend.r2, top,
-    verdict: significant
-      ? `دورة مهيمنة ≈ ${best.period.toFixed(1)} جلسة اجتازت اختبار Fisher عند α=${alpha}`
-      : 'لا توجد دورة تتفوّق على الضجيج الأبيض — أي «نافذة زمنية» تُبنى هنا ستكون وهماً',
-    _x: x, _prices: prices
-  };
-};
-
-/** النسخة المحسّنة: تنقية التردد خارج شبكة فورييه + ملاءمة الطور على نافذة
-    حديثة. بلا التنقية ينجرف الطور بمقدار نصف دورة على السلاسل الطويلة. */
-E.spectralPro = function (prices, opt = {}) {
-  const base = E.spectral(prices, opt);
-  if (!base.ok) return base;
-  const x = base._x, n = x.length;
-
-  /* تنقية التردد: بحث ذهبي حول تردد الشبكة لتعظيم الطاقة */
-  const f0 = base.freq;
-  const step = 1 / n;
-  let bestF = f0, bestP = -1;
-  for (let f = Math.max(1e-4, f0 - step); f <= f0 + step; f += step / 40) {
-    let re = 0, im = 0, w = 2 * Math.PI * f;
-    for (let t = 0; t < n; t++) { re += x[t] * Math.cos(w * t); im += x[t] * Math.sin(w * t); }
-    const pw = (re * re + im * im) / n;
-    if (pw > bestP) { bestP = pw; bestF = f; }
-  }
-  const gridErrorPct = +Math.abs((bestF - f0) / f0 * 100).toFixed(2);
-  const period = 1 / bestF;
-
-  /* ملاءمة السعة والطور على نافذة حديثة (آخر 3 دورات أو نصف السلسلة) */
-  const win = Math.min(n, Math.max(Math.round(period * 3), Math.round(n / 2)));
-  const seg = x.slice(-win), t0 = n - win;
-  let sc = 0, ss = 0, cc = 0, sss = 0, cs2 = 0;
-  const w = 2 * Math.PI * bestF;
-  for (let i = 0; i < seg.length; i++) {
-    const t = t0 + i, C = Math.cos(w * t), S = Math.sin(w * t);
-    sc += seg[i] * C; ss += seg[i] * S; cc += C * C; sss += S * S; cs2 += C * S;
-  }
-  const det = cc * sss - cs2 * cs2;
-  const A = det ? (sc * sss - ss * cs2) / det : 0;
-  const B = det ? (ss * cc - sc * cs2) / det : 0;
-  const amp = Math.sqrt(A * A + B * B);
-  const phase = Math.atan2(-B, A);
-
-  /* موضع الطور الحالي داخل الدورة: 0٪=قمة · 50٪=قاع */
-  const tNow = n - 1;
-  let ang = (w * tNow + phase) % (2 * Math.PI);
-  if (ang < 0) ang += 2 * Math.PI;
-  const cyclePosPct = +(ang / (2 * Math.PI) * 100).toFixed(1);
-
-  /* بواقي الملاءمة — تُستخدم لنطاق عدم اليقين في الإسقاط */
-  let ssRes = 0;
-  for (let i = 0; i < seg.length; i++) {
-    const t = t0 + i;
-    const fit = A * Math.cos(w * t) + B * Math.sin(w * t);
-    ssRes += (seg[i] - fit) ** 2;
-  }
-  const sigma = Math.sqrt(ssRes / Math.max(1, seg.length - 2));
-  /* حدّ كرامر-راو على الطور: σ_φ ≈ sqrt(2σ²/(N·A²)) */
-  const sdPhase = amp > 0 ? Math.sqrt(2 * sigma * sigma / (seg.length * amp * amp)) : Math.PI;
-  const sdBarsBase = sdPhase / (2 * Math.PI) * period;
-
-  const lastPrice = prices[prices.length - 1];
-  return {
-    ...base,
-    period: +period.toFixed(1), freq: +bestF.toFixed(6),
-    gridErrorPct, phase: +phase.toFixed(4),
-    amplitude: amp, amplitudePct: +(amp * 100).toFixed(3),
-    cyclePosPct, sigma, sdBarsBase,
-    cycles: [{ period, freq: bestF, amp, phase, sdBarsBase }],
-    _lastIndex: n - 1
-  };
-};
-
-/** إسقاط الانعطافات — كل انعطاف بنطاق عدم يقين يتّسع مع الأفق، لأنه كذلك
-    فعلاً: انعطاف بعد 5 جلسات أدقّ بكثير من انعطاف بعد 50.                 */
-E.projectTurnsPro = function (spec, horizon = 60) {
-  if (!spec || !spec.ok || !spec.significant || !spec.cycles?.length) return [];
-  const c = spec.cycles[0], w = 2 * Math.PI * c.freq, out = [];
-  const tNow = spec._lastIndex ?? 0;
-  /* القمم عند الزاوية 0 (mod 2π)، القيعان عند π */
-  for (let type of ['peak', 'valley']) {
-    const targetAng = type === 'peak' ? 0 : Math.PI;
-    for (let m = 0; m < 8; m++) {
-      /* نحل: w·t + phase ≡ targetAng (mod 2π) لأصغر t > tNow */
-      let t = (targetAng + 2 * Math.PI * m - c.phase) / w;
-      while (t <= tNow) t += c.period;
-      const barsAhead = Math.round(t - tNow);
-      if (barsAhead <= 0 || barsAhead > horizon) continue;
-      /* عدم اليقين يتّسع مع عدد الدورات المُسقطة */
-      const cyclesOut = barsAhead / c.period;
-      const sdBars = Math.max(1, c.sdBarsBase * Math.sqrt(1 + cyclesOut));
-      out.push({
-        type, barsAhead,
-        sdBars: +sdBars.toFixed(1),
-        loBars: Math.max(1, Math.round(barsAhead - 1.96 * sdBars)),
-        hiBars: Math.round(barsAhead + 1.96 * sdBars),
-        usable: sdBars <= c.period / 4   /* نطاق أوسع من ربع دورة = بلا فائدة عملية */
-      });
-    }
-  }
-  const seen = new Set();
-  return out.filter(t => { const k = t.type + '|' + t.barsAhead; if (seen.has(k)) return false; seen.add(k); return true; })
-    .sort((a, b) => a.barsAhead - b.barsAhead).slice(0, 10);
-};
-
-E.projectCycleTurns = function (spec, currentIndex, horizon = 60) {
-  return E.projectTurnsPro(spec, horizon).map(t => ({ type: t.type, barsAhead: t.barsAhead }));
-};
-
-/** تماسك الدورة خارج العيّنة: نبني الطيف على أول 70٪ ونسأل هل كان سيصيب
-    مواعيد انعطاف الـ30٪ الأخيرة التي لم يرها. هذا هو الفرق بين وصف
-    الماضي والتنبؤ.                                                        */
-E.cycleCoherence = function (cs) {
-  if (!cs || cs.length < 140) return { ok: false, reason: `${cs?.length || 0} جلسة — اختبار التماسك يحتاج 140 على الأقل` };
-  const prices = cs.map(c => c.close);
-  const split = Math.floor(prices.length * 0.7);
-  const train = prices.slice(0, split);
-  const sp = E.spectralPro(train, { alpha: 0.05 });
-  if (!sp.ok || !sp.significant) return { ok: false, reason: 'لا توجد دورة ذات دلالة في فترة التدريب — لا شيء يُختبر' };
-
-  const testCs = cs.slice(split);
-  const actual = E.pivots(testCs, 2).map(p => p.i);
-  if (actual.length < 3) return { ok: false, reason: 'الانعطافات الفعلية في فترة الاختبار أقل من 3' };
-
-  const turns = E.projectTurnsPro(sp, testCs.length + 5);
-  const predicted = turns.map(t => t.barsAhead);
-  if (!predicted.length) return { ok: false, reason: 'الدورة لم تُنتج انعطافات قابلة للاختبار' };
-
-  const tol = Math.max(2, Math.round(sp.period * 0.15));
-  let hits = 0; const offs = [];
-  for (const pr of predicted) {
-    let best = Infinity;
-    for (const a of actual) best = Math.min(best, Math.abs(a - pr));
-    offs.push(best);
-    if (best <= tol) hits++;
-  }
-  const hitRate = hits / predicted.length;
-  /* معدّل الصدفة: احتمال وقوع تنبؤ عشوائي داخل ±tol من أي انعطاف فعلي */
-  const covered = Math.min(1, actual.length * (2 * tol + 1) / testCs.length);
-  const p = Stats.twoPropP(hits, predicted.length, Math.round(covered * predicted.length), predicted.length);
-  const ci = Stats.wilsonCI(hits, predicted.length);
-  const reliable = hitRate > covered && p <= 0.05;
-  return {
-    ok: true, reliable,
-    hits, tried: predicted.length,
-    hitRatePct: +(hitRate * 100).toFixed(1),
-    hitRateCI: ci,
-    chanceRatePct: +(covered * 100).toFixed(1),
-    medianOffBars: +Stats.median(offs).toFixed(1),
-    toleranceBars: tol,
-    pValueText: Stats.fmtP(p),
-    verdict: reliable
-      ? 'الدورة أصابت مواعيد انعطاف لم ترها — تماسك خارج العيّنة مؤكد'
-      : 'إصابات الدورة لا تتفوّق على الصدفة — وصف للماضي أكثر منها تنبؤاً'
-  };
-};
-
-/* ══ 8) التنبؤ ARIMA(1,1,0) ════════════════════════════════════════════
-   نطاق عدم اليقين ليس σ√h — تلك صيغة المشي العشوائي المحض (φ=0). للنموذج
-   AR(1) على الفروق يكون التباين التراكمي بعد h خطوة:
-     Var(h) = σ²·Σ_{k=1..h} ψ_k²  حيث ψ_k = (1−φ^k)/(1−φ)                  */
-
-E.forecastARIMA = function (prices, h = 5) {
-  if (!prices || prices.length < 40) return { ok: false, reason: `${prices?.length || 0} سعراً — التنبؤ يحتاج 40 على الأقل` };
-  const d = [];
-  for (let i = 1; i < prices.length; i++) d.push(prices[i] - prices[i - 1]);
-  const n = d.length;
-  const mu = Stats.mean(d);
-  const dc = d.map(v => v - mu);
-  let num = 0, den = 0;
-  for (let i = 1; i < n; i++) { num += dc[i] * dc[i - 1]; den += dc[i - 1] * dc[i - 1]; }
-  const phi = den ? num / den : 0;
-
-  /* بواقي النموذج وσ */
-  let ssRes = 0, cnt = 0;
-  for (let i = 1; i < n; i++) { const e = dc[i] - phi * dc[i - 1]; ssRes += e * e; cnt++; }
-  const sigma = Math.sqrt(ssRes / Math.max(1, cnt - 1));
-
-  /* دلالة φ */
-  const sePhi = den ? sigma / Math.sqrt(den) : 0;
-  const tPhi = sePhi ? phi / sePhi : 0;
-  const phiP = Stats.tTestP(tPhi, Math.max(1, cnt - 1));
-
-  /* التنبؤ التكراري */
-  let last = prices[prices.length - 1], lastD = dc[n - 1], point = last;
-  const psi = []; let acc = 0;
-  for (let k = 1; k <= h; k++) {
-    const dk = mu + phi ** k * lastD;
-    point += dk;
-    const psiK = phi === 1 ? k : (1 - phi ** k) / (1 - phi);
-    psi.push(psiK);
-    acc += psiK * psiK;
-  }
-  const seH = sigma * Math.sqrt(acc);
-  const lo = point - 1.96 * seH, hi = point + 1.96 * seH;
-  const changePct = (point - last) / last * 100;
-  /* هل التنبؤ مميّز إحصائياً عن «لا تغيّر»؟ */
-  const meaningful = Math.abs(point - last) > 1.96 * seH;
-  return {
-    ok: true, point: +point.toFixed(2), lo: +lo.toFixed(2), hi: +hi.toFixed(2),
-    phi: +phi.toFixed(4), phiPValue: +phiP.toFixed(4), phiSignificant: phiP <= 0.05,
-    sigma: +sigma.toFixed(4), horizon: h,
-    bandPct: +((hi - lo) / 2 / last * 100).toFixed(2),
-    expectedChangePct: +changePct.toFixed(2),
-    meaningful,
-    note: meaningful
-      ? 'الفارق عن سعر اليوم يتجاوز نطاق عدم اليقين — تنبؤ ذو مضمون'
-      : 'نطاق عدم اليقين يبتلع الفارق: النموذج لا يقول أكثر من «لا تغيّر متوقع»'
-  };
-};
-
-/* ══ 9) ملف الحجم ══════════════════════════════════════════════════════
-   نقطة التحكّم (POC) ليست «إغلاق الشمعة الأعلى حجماً» — هي مستوى السعر
-   الذي تداول عنده أكبر حجم تراكمي، ويُحسب بتوزيع حجم كل شمعة على شرائح
-   السعر التي غطّاها مداها.                                                */
-
-E.volumeProfile = function (cs, opt = {}) {
-  const bins = opt.bins || 60;
-  if (!cs || cs.length < 10) return null;
-  let lo = Infinity, hi = -Infinity;
-  for (const c of cs) { if (c.low < lo) lo = c.low; if (c.high > hi) hi = c.high; }
-  if (!(hi > lo)) return null;
-  const w = (hi - lo) / bins;
-  const acc = new Array(bins).fill(0);
-
-  for (const c of cs) {
-    const a = Math.max(0, Math.floor((c.low - lo) / w));
-    const b = Math.min(bins - 1, Math.floor((c.high - lo) / w));
-    const span = b - a + 1;
-    const share = (c.volume || 0) / span;   /* توزيع متساوٍ على الشرائح المغطاة */
-    for (let i = a; i <= b; i++) acc[i] += share;
-  }
-
-  const total = acc.reduce((x, y) => x + y, 0);
-  if (!total) return null;
-  let pocIdx = 0;
-  for (let i = 1; i < bins; i++) if (acc[i] > acc[pocIdx]) pocIdx = i;
-
-  /* منطقة القيمة: توسّع من POC للجانبين حتى بلوغ 70٪ من الحجم */
-  let lower = pocIdx, upper = pocIdx, covered = acc[pocIdx];
-  while (covered / total < 0.70 && (lower > 0 || upper < bins - 1)) {
-    const dn = lower > 0 ? acc[lower - 1] : -1;
-    const up = upper < bins - 1 ? acc[upper + 1] : -1;
-    if (up >= dn) { upper++; covered += acc[upper]; } else { lower--; covered += acc[lower]; }
-  }
-  const mid = i => +(lo + w * (i + 0.5)).toFixed(2);
-  return {
-    poc: mid(pocIdx),
-    valueAreaLow: mid(lower), valueAreaHigh: mid(upper),
-    valueAreaPct: +(covered / total * 100).toFixed(1),
-    bins, rangeLow: +lo.toFixed(2), rangeHigh: +hi.toFixed(2)
-  };
-};
-
-/** نطاق القيمة — يجمع ثلاثة مراجع مستقلة: منطقة قيمة الحجم، قناة الانحدار،
-    ومرساة VWAP من آخر ارتكاز مؤكد. حين تتباعد الثلاثة يُصرَّح بذلك.        */
-E.valueBand = function (cs) {
-  if (!cs || cs.length < 60) return { ok: false, reason: `${cs?.length || 0} جلسة — نطاق القيمة يحتاج 60 على الأقل` };
-  const price = cs[cs.length - 1].close;
-  const vp = E.volumeProfile(cs, { bins: 60 });
-  if (!vp) return { ok: false, reason: 'تعذّر بناء ملف الحجم (حجم صفري أو مدى منعدم)' };
-
-  const closes = cs.map(c => c.close);
-  const lr = Stats.linreg(closes);
-  const n = closes.length;
-  let ssRes = 0;
-  for (let i = 0; i < n; i++) ssRes += (closes[i] - (lr.intercept + lr.slope * i)) ** 2;
-  const se = Math.sqrt(ssRes / Math.max(1, n - 2));
-  const center = lr.intercept + lr.slope * (n - 1);
-  const regressionLow = +(center - 2 * se).toFixed(2);
-  const regressionHigh = +(center + 2 * se).toFixed(2);
-
-  const pivot = E.lastConfirmedPivot(cs, 3);
-  const avwapArr = pivot ? Cumulative.anchoredVWAP(cs, pivot.i) : null;
-  const avwap = avwapArr ? avwapArr[n - 1] : null;
-
-  const anchors = [
-    { name: 'نقطة التحكّم (POC)', value: vp.poc },
-    { name: 'وسط قناة الانحدار', value: +center.toFixed(2) }
-  ];
-  if (avwap != null) anchors.push({ name: 'VWAP مثبّت من آخر ارتكاز', value: avwap });
-
-  const vals = anchors.map(a => a.value);
-  const aMean = Stats.mean(vals), aSd = Stats.sd(vals);
-  const zVsAnchors = aSd ? +((price - aMean) / aSd).toFixed(2) : null;
-
-  const bandLow = +Math.min(vp.valueAreaLow, regressionLow).toFixed(2);
-  const bandHigh = +Math.max(vp.valueAreaHigh, regressionHigh).toFixed(2);
-  const position = price < bandLow ? 'تحت النطاق' : price > bandHigh ? 'فوق النطاق' : 'داخل النطاق';
-  const spreadPct = aMean ? (Math.max(...vals) - Math.min(...vals)) / aMean * 100 : 0;
-
-  return {
-    ok: true, price: +price.toFixed(2),
-    center: +center.toFixed(2), bandLow, bandHigh, position,
-    deviationPct: +((price - center) / center * 100).toFixed(2),
-    regressionLow, regressionHigh, regressionR2: lr.r2,
-    valueArea: { low: vp.valueAreaLow, high: vp.valueAreaHigh, pct: vp.valueAreaPct, poc: vp.poc },
-    anchors, zVsAnchors,
-    caveat: spreadPct > 8
-      ? `المراجع الثلاثة متباعدة (${spreadPct.toFixed(1)}٪ بينها) — لا يوجد «سعر عادل» واحد، والنطاق أعلاه تقريب واسع`
-      : 'المراجع الثلاثة متقاربة — النطاق ذو معنى تشغيلي'
-  };
-};
-
-/** المستويات البنيوية — دعوم فوق/تحت السعر مرتّبة بالقرب، من ثلاثة مصادر */
-E.structuralLevels = function (cs, price) {
-  const supports = [], resistances = [], sources = {};
-  const push = (v, name) => {
-    if (v == null || !isFinite(v)) return;
-    const r = +v.toFixed(2);
-    if (r < price) supports.push({ price: r, source: name });
-    else if (r > price) resistances.push({ price: r, source: name });
-  };
-
-  const piv = E.pivots(cs, 3);
-  for (const p of piv.slice(-30)) push(p.price, p.type === 'H' ? 'قمة فراكتالية' : 'قاع فراكتالي');
-
-  const vp = E.volumeProfile(cs, { bins: 60 });
-  if (vp) { push(vp.poc, 'نقطة التحكّم'); push(vp.valueAreaLow, 'حدّ منطقة القيمة الأدنى'); push(vp.valueAreaHigh, 'حدّ منطقة القيمة الأعلى'); }
-
-  const n = cs.length;
-  const hi52 = Math.max(...cs.slice(-252).map(c => c.high));
-  const lo52 = Math.min(...cs.slice(-252).map(c => c.low));
-  push(hi52, 'قمة 52 أسبوعاً'); push(lo52, 'قاع 52 أسبوعاً');
-
-  supports.sort((a, b) => b.price - a.price);   /* الأقرب أولاً */
-  resistances.sort((a, b) => a.price - b.price);
-  sources.count = piv.length;
-  return { price: +price.toFixed(2), supports: supports.slice(0, 6), resistances: resistances.slice(0, 6), sources };
-};
-
-/* ══ 10) أهداف الفراكتال ═══════════════════════════════════════════════
-   الهدف من البنية لا من مضاعف: أقرب قمة فراكتالية لم تُكسر بعد.           */
-
-E.fractalTargets = function (cs, opt = {}) {
-  const k = opt.k || 2;
-  if (!cs || cs.length < k * 2 + 10) return { ok: false, reason: 'شموع غير كافية' };
-  const price = cs[cs.length - 1].close;
-  const piv = E.pivots(cs, k);
-  if (!piv.length) return { ok: false, reason: 'لا توجد نقاط فراكتالية' };
-
-  /* قمة «حيّة» = لم يُغلق السعر فوقها بعد تكوّنها */
-  const liveHighs = piv.filter(p => p.type === 'H' && p.price > price)
-    .filter(p => !cs.slice(p.i + 1).some(c => c.close > p.price))
-    .sort((a, b) => a.price - b.price);
-  const liveLows = piv.filter(p => p.type === 'L' && p.price < price)
-    .filter(p => !cs.slice(p.i + 1).some(c => c.close < p.price))
-    .sort((a, b) => b.price - a.price);
-
-  const target = liveHighs[0]?.price ?? null;
-  const target1 = target;
-  const support = liveLows[0]?.price ?? null;
-  /* مساحة نظيفة = لا قمة أخرى بين السعر والهدف ضمن 1.5٪ منه */
-  const cleanRunway = target != null && !liveHighs.slice(1).some(h => (h.price - target) / target < 0.015);
-
-  return {
-    ok: target != null || support != null,
-    target: target != null ? +target.toFixed(2) : null,
-    target1: target1 != null ? +target1.toFixed(2) : null,
-    support: support != null ? +support.toFixed(2) : null,
-    targetSource: target != null ? 'أقرب قمة فراكتالية غير مكسورة' : null,
-    cleanRunway,
-    highs: liveHighs.slice(0, 3).map(h => +h.price.toFixed(2)),
-    lows: liveLows.slice(0, 3).map(l => +l.price.toFixed(2))
-  };
-};
-
-/* ══ 11) خطة التنفيذ على السهم ═════════════════════════════════════════
-   الوقف من البنية (قاع/قمة فراكتالية) مع حدّ أدنى من ATR حتى لا يكون
-   ملتصقاً بالسعر، والهدف من أقرب مستوى بنيوي في اتجاه الصفقة.             */
-
-E.executionPlan = function (cs, opt = {}) {
-  const dirUp = opt.dirUp !== false;
-  if (!cs || cs.length < 40) return { ok: false, why: 'أقل من 40 جلسة — لا تُبنى خطة على بنية غير مكتملة' };
-  const price = cs[cs.length - 1].close;
-  const atr = E.atr(cs, 14);
-  if (!atr) return { ok: false, why: 'تعذّر حساب ATR' };
-
-  const frac = E.fractalTargets(cs, { k: 2 });
-  const lv = E.structuralLevels(cs, price);
-
-  /* ① الوقف */
-  let stop, stopSource;
-  if (dirUp) {
-    const cand = frac.support ?? lv.supports[0]?.price ?? null;
-    const atrFloor = price - 1.5 * atr;
-    if (cand != null && cand < price && cand > price - 4 * atr) { stop = Math.min(cand - 0.15 * atr, atrFloor); stopSource = 'أسفل أقرب قاع بنيوي بهامش 0.15×ATR'; }
-    else { stop = atrFloor; stopSource = '1.5×ATR تحت السعر (لا قاع بنيوي قريب)'; }
-  } else {
-    const cand = frac.target ?? lv.resistances[0]?.price ?? null;
-    const atrCap = price + 1.5 * atr;
-    if (cand != null && cand > price && cand < price + 4 * atr) { stop = Math.max(cand + 0.15 * atr, atrCap); stopSource = 'أعلى أقرب قمة بنيوية بهامش 0.15×ATR'; }
-    else { stop = atrCap; stopSource = '1.5×ATR فوق السعر (لا قمة بنيوية قريبة)'; }
-  }
-
-  /* ② الهدف */
-  let target1, targetSource;
-  if (dirUp) {
-    const cand = frac.target ?? lv.resistances[0]?.price ?? null;
-    if (cand != null && cand > price) { target1 = cand; targetSource = frac.target != null ? 'أقرب قمة فراكتالية غير مكسورة' : lv.resistances[0].source; }
-    else { target1 = price + 2 * atr; targetSource = '2×ATR فوق السعر (لا مقاومة بنيوية أعلاه)'; }
-  } else {
-    const cand = frac.support ?? lv.supports[0]?.price ?? null;
-    if (cand != null && cand < price) { target1 = cand; targetSource = frac.support != null ? 'أقرب قاع فراكتالي غير مكسور' : lv.supports[0].source; }
-    else { target1 = price - 2 * atr; targetSource = '2×ATR تحت السعر (لا دعم بنيوي أدناه)'; }
-  }
-
-  const entry = +price.toFixed(2);
-  stop = +stop.toFixed(2); target1 = +target1.toFixed(2);
-  const riskPerShare = +Math.abs(entry - stop).toFixed(2);
-  const reward = Math.abs(target1 - entry);
-  const rr1 = riskPerShare ? +(reward / riskPerShare).toFixed(2) : null;
-  const riskPct = +(riskPerShare / entry * 100).toFixed(2);
-
-  /* كم جلسة يحتاج الوصول للهدف بمعدّل حركة السهم الفعلي؟ */
-  const expectedSessionsToTarget = atr ? Math.ceil(reward / atr) : null;
-  const maxDaily = atr * 2.5;  /* أقصى حركة يومية معقولة = 2.5×ATR */
-  const minSessionsToTarget = maxDaily ? Math.max(1, Math.ceil(reward / maxDaily)) : null;
-
-  const viable = rr1 != null && rr1 >= 1.5;
-  return {
-    ok: true, entry, stop, target1, atr: +atr.toFixed(2),
-    stopSource, targetSource,
-    riskPerShare, riskPct, rr1,
-    expectedSessionsToTarget, minSessionsToTarget,
-    viable,
-    viabilityNote: viable
-      ? `العائد/المخاطرة ${rr1} على مستويات بنيوية`
-      : `العائد/المخاطرة ${rr1 ?? '—'} أقل من 1.5 — المسافة للهدف لا تبرّر المخاطرة`,
-    confirmCondition: dirUp
-      ? `إغلاق فوق ${(+(entry + 0.25 * atr)).toFixed(2)} يؤكّد الاستمرار`
-      : `إغلاق تحت ${(+(entry - 0.25 * atr)).toFixed(2)} يؤكّد الاستمرار`
-  };
-};
-
-/* ══ 12) تسعير الخيارات — بلاك-شولز ════════════════════════════════════
-   يُستخدم هنا لغرض واحد: إعادة تسعير العقد نفسه عند وقف السهم وهدفه، بدل
-   افتراض «الوقف = 50٪ من العلاوة». الفارق جوهري: عقد دلتا 0.30 يفقد عند
-   وقف السهم نسبة تختلف تماماً عن عقد دلتا 0.60 على نفس الحركة.            */
-
-const RISK_FREE = 0.043;   /* عائد أذون الخزانة قصيرة الأجل — مرجع تقريبي */
-
-function bs(S, K, T, sigma, isCall) {
-  if (!(S > 0) || !(K > 0) || !(sigma > 0) || !(T > 0)) {
-    const intr = isCall ? Math.max(0, S - K) : Math.max(0, K - S);
-    return { price: intr, delta: isCall ? (S > K ? 1 : 0) : (S < K ? -1 : 0), gamma: 0, theta: 0, vega: 0, probITM: S > K === isCall ? 1 : 0 };
-  }
-  const sq = sigma * Math.sqrt(T);
-  const d1 = (Math.log(S / K) + (RISK_FREE + sigma * sigma / 2) * T) / sq;
-  const d2 = d1 - sq;
-  const Nd1 = Stats.normCDF(d1), Nd2 = Stats.normCDF(d2);
-  const disc = Math.exp(-RISK_FREE * T);
-  const pdf = Stats.normPDF(d1);
-  if (isCall) {
-    return {
-      price: S * Nd1 - K * disc * Nd2,
-      delta: Nd1,
-      gamma: pdf / (S * sq),
-      theta: (-(S * pdf * sigma) / (2 * Math.sqrt(T)) - RISK_FREE * K * disc * Nd2) / 365,
-      vega: S * pdf * Math.sqrt(T) / 100,
-      probITM: Nd2
-    };
-  }
-  return {
-    price: K * disc * (1 - Nd2) - S * (1 - Nd1),
-    delta: Nd1 - 1,
-    gamma: pdf / (S * sq),
-    theta: (-(S * pdf * sigma) / (2 * Math.sqrt(T)) + RISK_FREE * K * disc * (1 - Nd2)) / 365,
-    vega: S * pdf * Math.sqrt(T) / 100,
-    probITM: 1 - Nd2
-  };
-}
-E.bs = bs;
-
-/* ══ 13) خطة العقد الأسبوعي ════════════════════════════════════════════
-   المدخل ctx يأتي جاهزاً من الواجهة (اتجاه + خطة تنفيذ على السهم + توقيت).
-   مهمة هذه الدالة: اختيار العقد، تسعير الوقف والهدف عليه، ثم إصدار حكم
-   صريح مع موانعه. لا تُخفي سبب رفض أبداً.                                 */
-
-E.weeklyOptionPlan = function (ctx) {
-  if (!ctx || !ctx.ok) return { ok: false, why: ctx?.why || 'سياق غير صالح' };
-  const { spot, candles, chain, dirUp, entryU, stopU, targetU, atr, sessionsToExpiry } = ctx;
-  if (!chain || !chain.length) return { ok: false, why: 'سلسلة العقود فارغة لهذا الاستحقاق' };
-  if (!(sessionsToExpiry > 0)) return { ok: false, why: 'الاستحقاق منتهٍ أو غير محدّد' };
-  if (!(atr > 0)) return { ok: false, why: 'ATR غير متاح — لا يمكن تقدير زمن الوصول للهدف' };
-
-  const isCall = !!dirUp;
-  const calDays = Math.max(1, Math.round(sessionsToExpiry * 7 / 5));
-  const T = calDays / 365;
-
-  /* التذبذب المحقّق مرجعاً لتسعير التذبذب الضمني */
-  const closes = candles.map(c => c.close);
-  const hv20 = E.realizedVol(closes, 20);
-
-  /* كم جلسة حتى الهدف والوقف بمعدّل حركة السهم الفعلي؟ */
-  const sessToTarget = Math.max(1, Math.ceil(Math.abs(targetU - spot) / atr));
-  const sessToStop = Math.max(1, Math.ceil(Math.abs(spot - stopU) / atr));
-
-  /* ── اختيار المرشّحين ── */
-  const cands = [];
-  for (const c of chain) {
-    const strike = +c.strike;
-    const bid = +c.bid || 0, ask = +c.ask || 0;
-    if (!(strike > 0)) continue;
-    const mid = (bid && ask) ? (bid + ask) / 2 : (+c.lastPrice || 0);
-    if (!(mid > 0.02)) continue;                       /* عقد بلا سعر فعلي */
-    const iv = (+c.impliedVolatility || 0) * 100;
-    const sigma = iv > 0 ? iv / 100 : (hv20 ? hv20 / 100 : 0.4);
-    const oi = +c.openInterest || 0, vol = +c.volume || 0;
-    const spreadPct = (bid && ask) ? (ask - bid) / mid * 100 : null;
-
-    const g = bs(spot, strike, T, sigma, isCall);
-    const absDelta = Math.abs(g.delta);
-    /* نستبعد الأطراف: دلتا < 0.15 رهان لوتري، ودلتا > 0.80 رأس مال بلا رافعة */
-    if (absDelta < 0.15 || absDelta > 0.80) continue;
-
-    /* إعادة تسعير عند وقف السهم وهدفه — بزمن متبقٍ أقل، لا بنفس الزمن */
-    const tAtTarget = Math.max(0.5, sessionsToExpiry - sessToTarget) * 7 / 5 / 365;
-    const tAtStop = Math.max(0.5, sessionsToExpiry - sessToStop) * 7 / 5 / 365;
-    const atTarget = bs(targetU, strike, tAtTarget, sigma, isCall).price;
-    const atStop = bs(stopU, strike, tAtStop, sigma, isCall).price;
-
-    const entry = +mid.toFixed(2);
-    const target = +Math.max(0.01, atTarget).toFixed(2);
-    const stop = +Math.max(0.01, atStop).toFixed(2);
-    const gain = target - entry, loss = entry - stop;
-    const rr = loss > 0.01 ? gain / loss : null;
-
-    const breakeven = isCall ? strike + entry : strike - entry;
-    const breakevenMovePct = Math.abs(breakeven - spot) / spot * 100;
-
-    /* ── التقييم (0–100) ── */
-    let score = 0;
-    /* السيولة 30 */
-    if (spreadPct != null) score += spreadPct <= 3 ? 18 : spreadPct <= 6 ? 13 : spreadPct <= 10 ? 7 : 0;
-    else score += 3;
-    score += oi >= 500 ? 7 : oi >= 100 ? 5 : oi >= 25 ? 2 : 0;
-    score += vol >= 200 ? 5 : vol >= 50 ? 3 : vol >= 10 ? 1 : 0;
-    /* الدلتا 20 — المنطقة 0.35–0.60 توازن الرافعة واحتمال البقاء */
-    score += (absDelta >= 0.35 && absDelta <= 0.60) ? 20 : (absDelta >= 0.25 && absDelta <= 0.70) ? 12 : 5;
-    /* تسعير التذبذب 20 */
-    const ivHv = (hv20 && iv) ? iv / hv20 : null;
-    if (ivHv != null) score += ivHv <= 0.95 ? 20 : ivHv <= 1.15 ? 15 : ivHv <= 1.4 ? 9 : ivHv <= 1.8 ? 4 : 0;
-    else score += 6;
-    /* العائد/المخاطرة 20 */
-    if (rr != null) score += rr >= 3 ? 20 : rr >= 2 ? 16 : rr >= 1.5 ? 11 : rr >= 1 ? 5 : 0;
-    /* ملاءمة الوقت 10 */
-    score += sessToTarget <= sessionsToExpiry * 0.6 ? 10 : sessToTarget <= sessionsToExpiry ? 6 : 0;
-
-    cands.push({
-      strike, entry, bid: +bid.toFixed(2), ask: +ask.toFixed(2), stop, target,
-      lossPct: +(loss / entry * 100).toFixed(1),
-      gainPct: +(gain / entry * 100).toFixed(1),
-      rr: rr != null ? +rr.toFixed(2) : null,
-      delta: +g.delta.toFixed(4), gamma: +g.gamma.toFixed(5),
-      theta: +g.theta.toFixed(4),
-      thetaPctPerSession: +(Math.abs(g.theta) * 1.4 / entry * 100).toFixed(2), /* 1.4 يوم تقويمي لكل جلسة */
-      iv: +iv.toFixed(1), ivHv: ivHv != null ? +ivHv.toFixed(2) : null,
-      probITM: +(g.probITM * 100).toFixed(1),
-      breakeven: +breakeven.toFixed(2),
-      breakevenMovePct: +breakevenMovePct.toFixed(2),
-      spreadPct: spreadPct != null ? +spreadPct.toFixed(1) : null,
-      openInterest: oi, volume: vol,
-      costPerContract: +(entry * 100).toFixed(0),
-      entryLimitFrom: +Math.max(0.01, mid - (ask - bid) * 0.15).toFixed(2),
-      entryLimitTo: +(mid + (ask - bid) * 0.15).toFixed(2),
-      score: Math.round(score)
-    });
-  }
-
-  if (!cands.length)
-    return { ok: false, why: 'لا يوجد عقد ضمن نطاق دلتا 0.15–0.80 بسعر فعلي على هذا الاستحقاق' };
-
-  cands.sort((a, b) => b.score - a.score);
-  const c = cands[0];
-
-  /* ── الحكم: الموانع أولاً، ثم أسباب الانتظار، ثم التنبيهات ── */
-  const blockers = [], waiters = [], warnings = [];
-
-  if (c.spreadPct != null && c.spreadPct > 12)
-    blockers.push(`فارق العرض والطلب ${c.spreadPct}٪ من العلاوة — تبدأ خاسراً بهذا المقدار قبل أي حركة`);
-  if (c.openInterest < 25 && c.volume < 10)
-    blockers.push(`سيولة شبه معدومة (فائدة مفتوحة ${c.openInterest} · حجم ${c.volume}) — الخروج قد يكون بسعر سيّئ أو متعذّراً`);
-  if (c.rr == null || c.rr < 1)
-    blockers.push(`العائد/المخاطرة ${c.rr ?? '—'} — الهدف لا يغطّي المخاطرة حتى لو تحقّق`);
-  if (c.ivHv != null && c.ivHv > 1.8)
-    blockers.push(`التذبذب الضمني ${c.iv}٪ مقابل المحقّق ${hv20}٪ (${c.ivHv}×) — تدفع علاوة تفترض حركة أضعاف ما يفعله السهم فعلاً`);
-  if (sessToTarget > sessionsToExpiry)
-    blockers.push(`الوصول للهدف يحتاج ${sessToTarget} جلسة بينما العقد يعيش ${sessionsToExpiry} — ينتهي قبل أن يصل`);
-
-  if (ctx.needsConfirmation)
-    waiters.push('أدلة الاتجاه غير حاسمة — انتظر إغلاق تأكيدي قبل دفع العلاوة');
-  if (sessToTarget > sessionsToExpiry * 0.75 && sessToTarget <= sessionsToExpiry)
-    waiters.push(`الهدف يحتاج ${sessToTarget} من ${sessionsToExpiry} جلسة — هامش الخطأ الزمني ضيّق`);
-  if (c.ivHv != null && c.ivHv > 1.4 && c.ivHv <= 1.8)
-    waiters.push(`التذبذب الضمني مرتفع (${c.ivHv}× المحقّق) — العلاوة غالية، فكّر في انتظار هدوئه`);
-  if (ctx.cycleSessionsToTurn != null && ctx.cycleSessionsToTurn > sessionsToExpiry)
-    waiters.push(`الانعطاف الدوري المتوقع بعد ${ctx.cycleSessionsToTurn} جلسة — بعد انتهاء العقد`);
-  if (c.rr != null && c.rr >= 1 && c.rr < 1.5)
-    waiters.push(`العائد/المخاطرة ${c.rr} — أقل من الحدّ الذي يبرّر عقداً أسبوعياً`);
-
-  if (c.thetaPctPerSession > 8)
-    warnings.push(`التآكل الزمني ${c.thetaPctPerSession}٪ من العلاوة كل جلسة إن لم يتحرّك السهم`);
-  if (c.breakevenMovePct > 4)
-    warnings.push(`نقطة التعادل تبعد ${c.breakevenMovePct}٪ عن السعر — تحتاج حركة كبيرة لمجرّد استرداد العلاوة`);
-  if (sessionsToExpiry <= 2)
-    warnings.push('جلستان أو أقل حتى الاستحقاق — غاما مرتفعة والسعر يتحرّك بعنف في الاتجاهين');
-  if (hv20 == null)
-    warnings.push('التذبذب المحقّق غير متاح — تعذّرت مقارنة سعر التذبذب الضمني');
-  warnings.push('احتمال الانتهاء داخل النقد ليس احتمال الربح — الربح يبدأ بعد نقطة التعادل');
-
-  const verdict = blockers.length ? 'avoid' : waiters.length ? 'wait' : 'enter';
-  const verdictLabel = verdict === 'enter' ? 'دخول' : verdict === 'wait' ? 'انتظار' : 'تجنّب';
-
-  const ivHvRatio = c.ivHv;
-  const volVerdict = ivHvRatio == null ? 'تعذّرت المقارنة'
-    : ivHvRatio <= 0.95 ? 'التذبذب الضمني أرخص من المحقّق — تسعير في صالح المشتري'
-    : ivHvRatio <= 1.15 ? 'تسعير عادل تقريباً'
-    : ivHvRatio <= 1.4 ? 'علاوة أغلى من الحركة الفعلية بقليل'
-    : 'علاوة غالية — السوق يسعّر حركة أكبر بكثير مما يفعله السهم';
-
-  /* الحركة المتوقعة حتى الاستحقاق من التذبذب الضمني: S·σ·√T */
-  const expMovePct = c.iv ? c.iv / 100 * Math.sqrt(T) * 100 : null;
-
-  return {
-    ok: true,
-    type: isCall ? 'call' : 'put',
-    typeLabel: isCall ? 'كول' : 'بوت',
-    spot: +spot.toFixed(2),
-    expiry: ctx.expiryDate,
-    sessionsToExpiry,
-    verdict, verdictLabel,
-    riskPerContractUsd: +((c.entry - c.stop) * 100).toFixed(0),
-    contract: c,
-    underlying: {
-      entry: +entryU.toFixed(2), stop: +stopU.toFixed(2), target: +targetU.toFixed(2),
-      atr: +atr.toFixed(2),
-      expectedSessionsToTarget: sessToTarget,
-      expectedSessionsToStop: sessToStop,
-      cycleSessionsToTurn: ctx.cycleSessionsToTurn ?? null
-    },
-    vol: { hv20: hv20, ivHvRatio, verdict: volVerdict },
-    expectedMove: expMovePct != null ? { pct: +expMovePct.toFixed(2) } : null,
-    blockers, waiters, warnings,
-    alternatives: cands.slice(1, 4).map(a => ({
-      strike: a.strike, entry: a.entry, target: a.target, stop: a.stop,
-      rr: a.rr, delta: a.delta, score: a.score
-    }))
-  };
-};
-
-/* ══ 14) الاختبار التاريخي للإشارة الطيفية ═════════════════════════════
-   بلا تسرّب زمني: عند كل شمعة يُعاد بناء الطيف من البيانات المتاحة حتى
-   تلك اللحظة فقط. وخط الأساس ليس عيّنة عشوائية بل التوزيع الكامل — لذلك
-   النتيجة حتمية ولا تتغيّر بين تشغيل وآخر.                                */
-
-const BT_CFG = { atrStopMult: 1.5, rewardRisk: 2, maxHoldBars: 15, alpha: 0.05, warmup: 120, step: 3 };
-
-function simulateTrade(cs, i, atrVal, cfg) {
-  const entry = cs[i].close;
-  const risk = cfg.atrStopMult * atrVal;
-  if (!(risk > 0)) return null;
-  const stop = entry - risk, target = entry + cfg.rewardRisk * risk;
-  for (let j = i + 1; j <= Math.min(cs.length - 1, i + cfg.maxHoldBars); j++) {
-    const hitStop = cs[j].low <= stop, hitTarget = cs[j].high >= target;
-    /* متحفّظ: لو لامست شمعة واحدة الاثنين تُحتسب وقفاً */
-    if (hitStop) return { win: false, r: -1, pnlPct: (stop - entry) / entry * 100, bars: j - i };
-    if (hitTarget) return { win: true, r: cfg.rewardRisk, pnlPct: (target - entry) / entry * 100, bars: j - i };
-  }
-  const exit = cs[Math.min(cs.length - 1, i + cfg.maxHoldBars)].close;
-  return { win: exit > entry, r: (exit - entry) / risk, pnlPct: (exit - entry) / entry * 100, bars: cfg.maxHoldBars };
-}
-
-function aggregate(trades) {
-  if (!trades.length) return null;
-  const wins = trades.filter(t => t.win).length;
-  const rs = trades.map(t => t.r);
-  const pnls = trades.map(t => t.pnlPct);
-  const gp = rs.filter(r => r > 0).reduce((a, b) => a + b, 0);
-  const gl = Math.abs(rs.filter(r => r < 0).reduce((a, b) => a + b, 0));
-  const sd = Stats.sd(rs);
-  let peak = 0, cum = 0, maxDd = 0;
-  for (const r of rs) { cum += r; if (cum > peak) peak = cum; maxDd = Math.max(maxDd, peak - cum); }
-  return {
-    count: trades.length,
-    winRatePct: +(wins / trades.length * 100).toFixed(1),
-    winRateCI: Stats.wilsonCI(wins, trades.length),
-    expectancyR: +Stats.mean(rs).toFixed(3),
-    avgPnlPct: +Stats.mean(pnls).toFixed(2),
-    profitFactor: gl ? +(gp / gl).toFixed(2) : null,
-    sharpePerTrade: sd ? +(Stats.mean(rs) / sd).toFixed(3) : null,
-    maxDrawdownR: +maxDd.toFixed(2),
-    avgBarsHeld: +Stats.mean(trades.map(t => t.bars)).toFixed(1),
-    _wins: wins
-  };
-}
-
-E.backtestSpectral = function (cs) {
-  const cfg = BT_CFG;
-  if (!cs || cs.length < cfg.warmup + 40)
-    return { ok: false, reason: `${cs?.length || 0} شمعة — الاختبار يحتاج ${cfg.warmup + 40} على الأقل`, config: cfg };
-
-  const closes = cs.map(c => c.close);
-  const sigTrades = [], baseTrades = [];
-  let signalCount = 0;
-  let lastSpec = null, lastSpecAt = -999;
-
-  for (let i = cfg.warmup; i < cs.length - cfg.maxHoldBars; i++) {
-    const atrVal = E.atr(cs.slice(0, i + 1), 14);
-    if (!atrVal) continue;
-
-    /* خط الأساس: كل شمعة مؤهّلة — التوزيع الكامل لا عيّنة عشوائية */
-    const b = simulateTrade(cs, i, atrVal, cfg);
-    if (b) baseTrades.push(b);
-
-    /* الطيف يُعاد بناؤه كل step شمعة (تكلفة حسابية) من البيانات المتاحة فقط */
-    if (i - lastSpecAt >= cfg.step) {
-      lastSpec = E.spectralPro(closes.slice(0, i + 1), { alpha: cfg.alpha });
-      lastSpecAt = i;
-    }
-    if (!lastSpec || !lastSpec.ok || !lastSpec.significant) continue;
-    /* إشارة الدخول: المرحلة الصاعدة من الدورة (50٪→92٪ حيث 50٪=قاع) */
-    const pos = lastSpec.cyclePosPct;
-    if (!(pos >= 48 && pos <= 92)) continue;
-    signalCount++;
-    const t = simulateTrade(cs, i, atrVal, cfg);
-    if (t) sigTrades.push(t);
-  }
-
-  const S = aggregate(sigTrades), B = aggregate(baseTrades);
-  if (!S || S.count < 20)
-    return {
-      ok: false,
-      reason: `عدد صفقات الإشارة ${S?.count || 0} — أقل من 20، وأي حكم على هذه العيّنة يكون ضجيجاً لا نتيجة`,
-      signal: S, baseline: B, signalCount, config: cfg
-    };
-
-  const p = Stats.twoPropP(S._wins, S.count, B._wins, B.count);
-  const significant = p <= cfg.alpha && S.winRatePct > B.winRatePct;
-  return {
-    ok: true, signal: S, baseline: B, signalCount, config: cfg,
-    edgeWinRatePct: +(S.winRatePct - B.winRatePct).toFixed(1),
-    edgeExpectancyR: +(S.expectancyR - B.expectancyR).toFixed(3),
-    pValue: +p.toFixed(5), pValueText: Stats.fmtP(p), significant,
-    verdict: significant
-      ? `الإشارة تتفوّق على خط الأساس بفارق لا تفسّره الصدفة عند α=${cfg.alpha}`
-      : 'الفارق عن خط الأساس ضمن ما تنتجه الصدفة — لا أفضلية مُثبتة لهذه الإشارة على هذا السهم'
-  };
-};
-
-/* ══ تصدير ═════════════════════════════════════════════════════════════ */
-if (typeof window !== 'undefined') window.KSAEngine = E;
-if (typeof module !== 'undefined' && module.exports) module.exports = E;
-
-})();
-
-</script>
+<script src="/engine/core.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
 :root{--c0:#04060e;--c1:#080b16;--c2:#0c1020;--c3:#111628;--c4:#172030;--bd:rgba(255,255,255,.055);--bd2:rgba(255,255,255,.1);--t1:#dde3f0;--t2:#7a8ba8;--t3:#3d4a5e;--up:#0ecf7e;--dn:#f04458;--ubg:rgba(14,207,126,.08);--dbg:rgba(240,68,88,.08);--bl:#4a9eff;--bl2:rgba(74,158,255,.12);--gd:#f5c842;--pu:#a78bfa;--cy:#22d3ee;--or:#fb923c;--pk:#f472b6;--base-font:12px}
@@ -1538,8 +278,192 @@ body{height:100%;background:var(--c0);color:var(--t1);font-family:'IBM Plex Sans
 .ib-ch-h{position:absolute;top:0;left:0;right:0;z-index:10;padding:5px 10px;display:flex;align-items:center;gap:8px;background:linear-gradient(180deg,rgba(4,6,14,.95),rgba(4,6,14,.5),transparent);pointer-events:none}.ib-ch-h>*{pointer-events:auto}
 .ib-prog{display:none;padding:7px 12px;background:var(--c2)}.ib-prog.show{display:flex;align-items:center;gap:8px}.ib-pg-b{flex:1;height:5px;background:var(--c3);border-radius:3px;overflow:hidden}.ib-pg-f{height:100%;background:linear-gradient(90deg,#FFD700,var(--up));border-radius:3px;transition:width .15s}.ib-pg-t{font-size:9px;color:var(--t2);white-space:nowrap}
 .ib-empty{padding:30px;text-align:center;color:var(--t3)}.ib-empty-i{font-size:36px;margin-bottom:8px;opacity:.5}
+/* ══════════════════════════════════════════════════════════════════════
+   ⚡ PRO PATCH — طبقة الجوال + طبقة التنفيذ + التنبيهات
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── ارتفاع صحيح على الجوال (شريط المتصفح يبتلع 100vh) ── */
+html,body{height:100%}
+@supports(height:100dvh){html,body{height:100dvh}}
+body{overscroll-behavior-y:none}
+
+/* ── شاشة الخطأ: بدل الشاشة البيضاء الصامتة ── */
+#boot-err{display:none;position:fixed;inset:0;z-index:100000;background:#04060e;color:#dde3f0;
+  padding:22px;overflow:auto;font-size:13px;line-height:1.9;direction:rtl}
+#boot-err.show{display:block}
+#boot-err b{color:#f04458}
+#boot-err pre{background:#0c1020;border:1px solid rgba(255,255,255,.08);border-radius:8px;
+  padding:10px;white-space:pre-wrap;word-break:break-word;font-size:11px;color:#7a8ba8;direction:ltr;text-align:left}
+#boot-err button{margin-top:14px;padding:10px 20px;border-radius:8px;border:1px solid rgba(255,215,0,.35);
+  background:rgba(255,215,0,.1);color:#FFD700;font-family:inherit;font-size:13px;font-weight:700;cursor:pointer}
+
+/* ══ MARKET BRAIN — مخفي افتراضياً، يفتح/يغلق بالنقر ══ */
+.ib{display:none}
+.ib.mb-on{display:block}
+.main{padding-bottom:0}
+body.mb-on .main{padding-bottom:44px}
+.mb-fab{position:fixed;bottom:14px;left:14px;z-index:997;height:38px;padding:0 13px;border-radius:20px;
+  background:linear-gradient(135deg,rgba(255,215,0,.16),rgba(14,207,126,.09));
+  border:1px solid rgba(255,215,0,.32);color:#FFD700;font-size:12px;font-weight:700;font-family:inherit;
+  display:flex;align-items:center;gap:6px;cursor:pointer;box-shadow:0 6px 22px rgba(0,0,0,.55)}
+.mb-fab:active{transform:scale(.95)}
+.mb-fab.hide{display:none}
+
+/* ══ بطاقة التنفيذ — «ادخل هنا» ══ */
+.act-wrap{display:none;flex-shrink:0;border-bottom:1px solid rgba(14,207,126,.22);
+  background:linear-gradient(135deg,rgba(14,207,126,.07),rgba(255,215,0,.03));padding:9px 11px}
+.act-wrap.show{display:block}
+.act-head{display:flex;align-items:center;gap:8px;margin-bottom:7px;flex-wrap:wrap}
+.act-verdict{font-size:15px;font-weight:800;letter-spacing:.2px}
+.act-sym{font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:800;color:#4a9eff}
+.act-name{font-size:11px;color:var(--t2);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.act-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.act-box{background:var(--c2);border:1px solid var(--bd);border-radius:8px;padding:7px 8px;text-align:center}
+.act-box-l{font-size:9px;color:var(--t3);font-weight:600;margin-bottom:2px}
+.act-box-v{font-size:16px;font-weight:800;font-family:'IBM Plex Mono',monospace;line-height:1.2}
+.act-line{margin-top:7px;padding:8px 10px;border-radius:8px;background:rgba(255,215,0,.07);
+  border:1px solid rgba(255,215,0,.22);font-size:12px;line-height:1.75;color:#e6e9f0}
+.act-line b{color:#FFD700;font-family:'IBM Plex Mono',monospace}
+.act-exit{margin-top:6px;padding:8px 10px;border-radius:8px;background:rgba(240,68,88,.06);
+  border:1px solid rgba(240,68,88,.2);font-size:12px;line-height:1.75;color:#e6e9f0}
+.act-exit b{color:#f04458;font-family:'IBM Plex Mono',monospace}
+.act-btns{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.act-btn{flex:1;min-width:104px;padding:9px 10px;border-radius:8px;font-family:inherit;font-size:12px;
+  font-weight:700;cursor:pointer;border:1px solid;transition:all .12s}
+.act-btn-go{background:rgba(14,207,126,.14);border-color:rgba(14,207,126,.4);color:#0ecf7e}
+.act-btn-al{background:rgba(255,215,0,.1);border-color:rgba(255,215,0,.32);color:#FFD700}
+.act-btn-nx{background:none;border-color:var(--bd2);color:var(--t2)}
+.act-btn:active{transform:scale(.97)}
+
+/* ══ بطاقات الفرص (وضع المضارب / الجوال) ══ */
+.opp-list{padding:6px}
+.opp{border-radius:10px;border:1px solid var(--bd);background:var(--c2);margin-bottom:7px;
+  overflow:hidden;cursor:pointer;transition:border-color .12s}
+.opp:active{border-color:rgba(255,215,0,.4)}
+.opp-top{display:flex;align-items:center;gap:7px;padding:8px 10px;border-bottom:1px solid var(--bd)}
+.opp-rank{width:22px;height:22px;border-radius:6px;background:rgba(255,215,0,.1);border:1px solid rgba(255,215,0,.22);
+  color:#FFD700;font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;
+  font-family:'IBM Plex Mono',monospace}
+.opp-sym{font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:800;color:#4a9eff}
+.opp-nm{font-size:10px;color:var(--t2);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.opp-pct{font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:700}
+.opp-verdict{padding:6px 10px;font-size:13px;font-weight:800;display:flex;align-items:center;
+  justify-content:space-between;gap:8px}
+.opp-ready{font-size:10px;color:var(--t2);font-family:'IBM Plex Mono',monospace;font-weight:600}
+.opp-lv{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;padding:0 8px 8px}
+.opp-lv-i{background:var(--c3);border:1px solid var(--bd);border-radius:6px;padding:5px 3px;text-align:center}
+.opp-lv-l{font-size:8px;color:var(--t3);font-weight:600}
+.opp-lv-v{font-size:12.5px;font-weight:800;font-family:'IBM Plex Mono',monospace;margin-top:1px}
+.opp-why{padding:0 10px 8px;font-size:10.5px;color:var(--t2);line-height:1.65}
+.opp-act{display:flex;gap:5px;padding:0 8px 8px}
+.opp-act button{flex:1;padding:7px 6px;border-radius:6px;font-family:inherit;font-size:11px;font-weight:700;
+  cursor:pointer;border:1px solid}
+.opp-b1{background:rgba(14,207,126,.12);border-color:rgba(14,207,126,.35);color:#0ecf7e}
+.opp-b2{background:rgba(255,215,0,.08);border-color:rgba(255,215,0,.28);color:#FFD700}
+.opp-b3{background:none;border-color:var(--bd2);color:var(--t2)}
+.tier-a{border-right:3px solid #0ecf7e}
+.tier-b{border-right:3px solid #f5c842}
+.tier-c{border-right:3px solid #4a9eff}
+
+/* ══ التنبيهات — Toasts ══ */
+#toast-wrap{position:fixed;top:46px;left:50%;transform:translateX(-50%);z-index:99998;
+  display:flex;flex-direction:column;gap:7px;width:min(420px,calc(100vw - 24px));pointer-events:none}
+.toast{pointer-events:auto;background:#0f1420;border:1px solid rgba(255,215,0,.3);border-radius:10px;
+  padding:10px 12px;box-shadow:0 10px 34px rgba(0,0,0,.6);font-size:12.5px;line-height:1.7;color:#e6e9f0;
+  animation:tin .22s ease-out;display:flex;gap:9px;align-items:flex-start}
+.toast.up{border-color:rgba(14,207,126,.4)}
+.toast.dn{border-color:rgba(240,68,88,.4)}
+.toast-i{font-size:17px;line-height:1.2;flex-shrink:0}
+.toast-b{flex:1;min-width:0}
+.toast-t{font-weight:800;margin-bottom:2px}
+.toast-x{color:var(--t3);cursor:pointer;font-size:15px;padding:0 3px;flex-shrink:0}
+@keyframes tin{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+
+/* ══ مركز التنبيهات ══ */
+.alert-chip{position:relative}
+.alert-chip .badge{position:absolute;top:-5px;right:-5px;min-width:15px;height:15px;border-radius:8px;
+  background:#f04458;color:#fff;font-size:9px;font-weight:800;display:flex;align-items:center;
+  justify-content:center;padding:0 3px}
+#alert-panel{position:fixed;top:40px;left:8px;width:min(360px,calc(100vw - 16px));max-height:70vh;overflow:auto;
+  background:#0f1420;border:1px solid rgba(255,215,0,.25);border-radius:12px;z-index:99997;display:none;
+  box-shadow:0 16px 46px rgba(0,0,0,.65)}
+#alert-panel.show{display:block}
+.ap-hdr{position:sticky;top:0;background:#0f1420;padding:11px 13px;border-bottom:1px solid rgba(255,255,255,.07);
+  display:flex;align-items:center;gap:8px;font-size:13px;font-weight:800;color:#FFD700}
+.ap-item{padding:9px 13px;border-bottom:1px solid rgba(255,255,255,.05);font-size:12px;line-height:1.75}
+.ap-item .t{font-weight:700}
+.ap-time{font-size:9.5px;color:var(--t3);font-family:'IBM Plex Mono',monospace}
+.ap-empty{padding:26px;text-align:center;color:var(--t3);font-size:12px}
+
+/* ══ شريط تنقل الجوال ══ */
+.mnav{display:none;position:fixed;bottom:0;left:0;right:0;height:56px;z-index:996;
+  background:rgba(8,11,22,.97);backdrop-filter:blur(12px);border-top:1px solid rgba(255,255,255,.08);
+  padding-bottom:env(safe-area-inset-bottom)}
+.mnav-i{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  color:var(--t3);font-size:9.5px;font-weight:600;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.mnav-i .ic{font-size:19px;line-height:1}
+.mnav-i.on{color:#FFD700}
+
+/* ══════════════════ الجوال ══════════════════ */
+@media(max-width:900px){
+  body.mobile .mnav{display:flex}
+  body.mobile .main{padding-bottom:56px!important;flex-direction:column}
+  body.mobile .mb-fab{bottom:66px}
+  body.mobile.mb-on .main{padding-bottom:100px!important}
+
+  /* عرض واحد في المرة — هذا سبب عدم ظهور القائمة سابقاً */
+  body.mobile .filters-panel{width:100%!important;min-width:0!important;min-height:0!important;
+    height:100%!important;border-left:none;border-bottom:none;flex:1 1 auto}
+  body.mobile .right-panel{width:100%!important;min-width:0!important;min-height:0!important;
+    height:100%!important;flex:1 1 auto}
+  body.mobile[data-view="list"] .right-panel{display:none!important}
+  body.mobile[data-view="chart"] .filters-panel{display:none!important}
+
+  /* أهداف لمس أكبر */
+  body.mobile .ftab{padding:11px 14px;font-size:12px}
+  body.mobile .ftabs{-webkit-overflow-scrolling:touch;overflow-x:auto;cursor:auto}
+  body.mobile .scan-btn,body.mobile .ib-btn{padding:8px 13px;font-size:11.5px}
+  body.mobile .tf,body.mobile .tf-interval{padding:6px 11px;font-size:11px}
+  body.mobile .results-wrap{-webkit-overflow-scrolling:touch}
+  body.mobile .rtbl th,body.mobile .rtbl td{padding:9px 8px}
+  body.mobile .top{height:44px;padding:0 9px}
+  body.mobile .logo{font-size:11px;letter-spacing:.5px}
+  body.mobile .logo-sub{display:none}
+  body.mobile .stock-search input{width:118px;font-size:12px;padding:7px 8px 7px 26px}
+  body.mobile .stock-search input:focus{width:150px}
+  body.mobile .zoom-ctrl{display:none}
+  body.mobile #chart-area{max-height:none;height:100%;min-height:230px}
+  body.mobile .draw-ctrl,body.mobile .pat-ctrl{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+  body.mobile .kb-hint{display:none}
+  body.mobile .act-grid{grid-template-columns:repeat(2,1fr)}
+  body.mobile #toast-wrap{top:50px}
+  body.mobile #alert-panel{top:46px;left:6px;right:6px;width:auto}
+  body.mobile .ib.mb-on{height:calc(100dvh - 100px)}
+  body.mobile .ib.mb-on.closed{height:44px}
+  /* الجداول العريضة تنزلق أفقياً بدل أن تختفي */
+  body.mobile .rtbl{min-width:760px}
+  body.mobile .opp-list .rtbl{min-width:0}
+}
+
+/* ══ إصلاحات دقيقة ══ */
+body.mobile #dd-cards-btn{display:none}
+.opp,.act-wrap,#tar-body,.ap-item{user-select:text;-webkit-user-select:text}
+.rtbl.cards-mode{min-width:0!important}
+body.mobile .rtbl.cards-mode{min-width:0!important}
+body.mobile .ib{bottom:56px}
+body.mobile .ib.mb-on{height:calc(100dvh - 170px)}
+body.mobile .ib.mb-on.closed{height:44px}
+.ib-close{margin-right:6px;color:#7a8ba8;font-size:15px;cursor:pointer;padding:0 6px;line-height:1}
+.ib-close:hover{color:#f04458}
+
+/* ══ وضع المضارب البسيط ══ */
+body.simple .pat-ctrl,body.simple .draw-ctrl{display:none}
+body.simple .kb-hint{display:none}
+.simple-toggle{padding:4px 11px;border-radius:14px;font-size:10px;font-weight:700;cursor:pointer;
+  border:1px solid rgba(14,207,126,.3);background:rgba(14,207,126,.08);color:#0ecf7e;font-family:inherit}
+body.simple .simple-toggle{background:rgba(14,207,126,.22);border-color:rgba(14,207,126,.55)}
+
 </style>
-</head>
 </head>
 <body>
 
@@ -1620,6 +544,8 @@ body{height:100%;background:var(--c0);color:var(--t1);font-family:'IBM Plex Sans
         <button class="dd-mode on" onclick="ddSetMode('launch',this)" style="padding:4px 11px;font-size:10px;font-family:inherit;border:none;border-left:1px solid var(--bd2);background:rgba(14,207,126,.18);color:#0ecf7e;cursor:pointer">🚀 جاهزة للانطلاق</button>
         <button class="dd-mode" onclick="ddSetMode('exec',this)" style="padding:4px 11px;font-size:10px;font-family:inherit;border:none;background:transparent;color:var(--t2);cursor:pointer">✅ جاهزة للتنفيذ</button>
       </div>
+      <button id="dd-cards-btn" onclick="PRO.toggleCards()" class="scan-btn" style="background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.35);color:#a78bfa;flex-shrink:0">📊 عرض جدول</button>
+      <button onclick="PRO.toggleAlertPanel()" class="scan-btn" style="background:rgba(240,68,88,.1);border:1px solid rgba(240,68,88,.3);color:#f04458;flex-shrink:0">🔔 التنبيهات</button>
       <button onclick="ddBrief()" class="scan-btn" style="background:rgba(255,215,0,.12);border:1px solid rgba(255,215,0,.35);color:#FFD700;flex-shrink:0">📋 الملخص التنفيذي</button>
       <button onclick="ddBook()" class="scan-btn" style="background:rgba(74,158,255,.12);border:1px solid rgba(74,158,255,.35);color:#4a9eff;flex-shrink:0">📓 مراكزي</button>
       <span style="font-size:10px;color:var(--t3)">رأس المال:</span>
@@ -1634,7 +560,7 @@ body{height:100%;background:var(--c0);color:var(--t1);font-family:'IBM Plex Sans
       <button id="spectral-scan-btn" onclick="runSpectralScanAll()" class="scan-btn scan-sec" style="background:rgba(255,215,0,.12)!important;border-color:rgba(255,215,0,.3)!important;color:#FFD700!important;flex-shrink:0">🔄 امسح الآن لكل الأسهم</button>
       <span id="spectral-scan-prog" style="font-size:11px;color:var(--t3)">لم يتم المسح بعد — اضغط الزر لبدء اختبار كل الأسهم</span>
     </div>
-    <div style="padding:5px 12px;font-size:9px;color:var(--t3);border-bottom:1px solid var(--bd)">⌨️ تنقل: <b style="color:var(--t2)">↑↓</b> صفوف · <b style="color:var(--t2)">←→</b> تبويبات · <b style="color:var(--t2)">Enter</b> فتح السهم · <b style="color:var(--t2)">Space</b> فتح + شرح · <b style="color:var(--t2)">1-9</b> قفز لتبويب · <b style="color:var(--t2)">Esc</b> إلغاء</div>
+    <div class="kb-hint" style="padding:5px 12px;font-size:9px;color:var(--t3);border-bottom:1px solid var(--bd)">⌨️ تنقل: <b style="color:var(--t2)">↑↓</b> صفوف · <b style="color:var(--t2)">←→</b> تبويبات · <b style="color:var(--t2)">Enter</b> فتح السهم · <b style="color:var(--t2)">Space</b> فتح + شرح · <b style="color:var(--t2)">1-9</b> قفز لتبويب · <b style="color:var(--t2)">Esc</b> إلغاء</div>
 
     <!-- Scan Controls -->
     <div class="scan-bar">
@@ -1650,6 +576,9 @@ body{height:100%;background:var(--c0);color:var(--t1);font-family:'IBM Plex Sans
       <button class="scan-btn scan-sec" onclick="runSpectralBacktestReport()" style="background:rgba(255,215,0,.12)!important;border-color:rgba(255,215,0,.3)!important;color:#FFD700!important">🧪 اختبار الإشارة الطيفية</button>
       <div id="scan-prog"><div class="prog-bar"><div class="prog-fill" id="prog-fill"></div></div><span class="prog-txt" id="prog-txt"></span></div>
     </div>
+
+    <!-- ⚡ PRO: بطاقة التنفيذ -->
+    <div class="act-wrap" id="act-wrap"></div>
 
     <!-- Results -->
     <div class="results-wrap" id="results-wrap">
@@ -1735,6 +664,7 @@ body{height:100%;background:var(--c0);color:var(--t1);font-family:'IBM Plex Sans
     <span class="ib-bdg ib-bdg-ai" id="ib-ai-b">🧬 AI Adaptive</span>
     <span class="ib-bdg ib-bdg-u" id="ib-cnt">0 إشارة</span>
     <span class="ib-arr" id="ib-arr">▼</span>
+    <span class="ib-close" onclick="event.stopPropagation();PRO.toggleBrain()" title="إخفاء Market Brain">✕</span>
   </div>
   <div class="ib-body" id="ib-bd">
     <div class="ib-ctrl">
@@ -1773,6 +703,40 @@ body{height:100%;background:var(--c0);color:var(--t1);font-family:'IBM Plex Sans
       <div class="ib-sigs" id="ib-sg"><div class="ib-empty"><div class="ib-empty-i">🧠</div><div style="font-size:12px;color:var(--t2)">Market Brain</div><div style="font-size:9px;color:var(--t3);margin-top:4px">اضغط "مسح مؤسسي"</div></div></div>
     </div>
   </div>
+</div>
+
+<!-- ══ PRO PATCH: شاشة خطأ بدل الشاشة البيضاء ══ -->
+<div id="boot-err">
+  <div style="font-size:17px;font-weight:800;margin-bottom:10px">⚠️ <b>تعذّر تشغيل المنصة</b></div>
+  <div id="boot-err-msg" style="margin-bottom:10px"></div>
+  <pre id="boot-err-detail"></pre>
+  <button onclick="location.reload()">🔄 إعادة المحاولة</button>
+</div>
+
+<!-- ══ PRO PATCH: التنبيهات ══ -->
+<div id="toast-wrap"></div>
+<div id="alert-panel">
+  <div class="ap-hdr">
+    🔔 مركز التنبيهات
+    <span id="ap-live" style="font-size:9.5px;font-weight:600;color:#0ecf7e"></span>
+    <span style="margin-right:auto;display:flex;gap:6px">
+      <span onclick="PRO.clearAlerts()" style="cursor:pointer;color:#7a8ba8;font-size:11px;font-weight:600">مسح</span>
+      <span onclick="PRO.toggleAlertPanel(false)" style="cursor:pointer;color:#7a8ba8;font-size:16px">✕</span>
+    </span>
+  </div>
+  <div id="ap-armed" style="padding:9px 13px;border-bottom:1px solid rgba(255,255,255,.07);font-size:11.5px;color:#7a8ba8;line-height:1.8"></div>
+  <div id="ap-list"><div class="ap-empty">لا تنبيهات بعد.<br>سلّح فرصة من غرفة القرار ليبدأ المراقب.</div></div>
+</div>
+
+<!-- ══ PRO PATCH: زر Market Brain العائم ══ -->
+<div class="mb-fab" id="mb-fab" onclick="PRO.toggleBrain()">🧠 <span id="mb-fab-t">Market Brain</span></div>
+
+<!-- ══ PRO PATCH: شريط تنقل الجوال ══ -->
+<div class="mnav" id="mnav">
+  <div class="mnav-i on" data-v="list" onclick="PRO.setView('list')"><span class="ic">📋</span><span>الفرص</span></div>
+  <div class="mnav-i" data-v="chart" onclick="PRO.setView('chart')"><span class="ic">📈</span><span>الشارت</span></div>
+  <div class="mnav-i" data-v="decision" onclick="PRO.goDecision()"><span class="ic">🧭</span><span>غرفة القرار</span></div>
+  <div class="mnav-i" data-v="alerts" onclick="PRO.toggleAlertPanel()"><span class="ic">🔔</span><span>التنبيهات</span></div>
 </div>
 
 <script>
@@ -2023,111 +987,13 @@ const NAMES={
 'EEM':'الأسواق الناشئة',
 'FXI':'الصين',
 'IBIT':'بتكوين (آي شيرز)',
-'UVXY':'مؤشر الخوف 1.5×',
-'GME':'جيم ستوب',
-'AMC':'إيه إم سي',
-'RIOT':'رايوت بلاتفورمز',
-'MARA':'مارا هولدنجز',
-'CLSK':'كلين سبارك',
-'HUT':'هَت 8',
-'WULF':'تيرا وولف',
-'CORZ':'كور سايانتيفك',
-'APLD':'أبلايد ديجيتال',
-'IONQ':'آيون كيو',
-'RGTI':'ريجيتي',
-'QBTS':'دي-ويف كوانتم',
-'BBAI':'بيغ بير إيه آي',
-'SOUN':'صاوند هاوند',
-'AI':'سي ثري إيه آي',
-'PATH':'يو آي باث',
-'S':'سنتينل ون',
-'ESTC':'إلاستيك',
-'GTLB':'جيت لاب',
-'NBIS':'نيبيوس',
-'VRT':'فيرتيف',
-'WOLF':'وولف سبيد',
-'LAZR':'لومينار',
-'QS':'كوانتم سكيب',
-'ENVX':'إينوفكس',
-'CHPT':'تشارج بوينت',
-'PLUG':'بلج باور',
-'NKLA':'نيكولا',
-'FUBO':'فيوبو تي في',
-'OPEN':'أوبن دور',
-'UPST':'أب ستارت',
-'LMND':'ليمونيد',
-'PTON':'بيلوتون',
-'W':'وايفير',
-'CHWY':'تشوي',
-'ETSY':'إتسي',
-'ZM':'زووم',
-'DOCU':'دوكيوساين',
-'TWLO':'تويليو',
-'OKTA':'أوكتا',
-'ROKU':'روكو',
-'RBLX':'روبلوكس',
-'U':'يونيتي',
-'SQ':'بلوك',
-'SHOP':'شوبيفاي',
-'TTD':'ذا تريد ديسك',
-'NIO':'نيو',
-'XPEV':'إكس بينج',
-'LI':'لي أوتو',
-'BABA':'علي بابا',
-'PDD':'بي دي دي',
-'JD':'جيه دي دوت كوم',
-'SE':'سي ليمتد',
-'GRAB':'جراب',
-'MELI':'ميركادو ليبري',
-'NU':'نو هولدنجز',
-'RKLB':'روكيت لاب',
-'ASTS':'إيه إس تي سبيس موبايل',
-'ACHR':'آرتشر أفييشن',
-'JOBY':'جوبي أفييشن',
-'LUNR':'إنتويتف ماشينز',
-'OKLO':'أوكلو',
-'SMR':'نيوسكيل باور',
-'NNE':'نانو نيوكلير',
-'FSLR':'فيرست سولار',
-'ENPH':'إنفيز إنرجي',
-'RUN':'صن ران',
-'AAL':'أمريكان إيرلاينز',
-'CCL':'كرنفال',
-'NCLH':'نورويجيان كروز',
-'RCL':'رويال كاريبيان',
-'VOO':'فانجارد S&P 500',
-'VTI':'فانجارد السوق الكلي',
-'IVV':'آي شيرز S&P 500',
-'SCHD':'شواب توزيعات',
-'JEPI':'جيه بي مورجان دخل',
-'JEPQ':'جيه بي مورجان ناسداك دخل',
-'TNA':'راسل 2000 ×3',
-'SPXL':'S&P 500 ×3',
-'LABU':'التقنية الحيوية ×3',
-'YINN':'الصين ×3',
-'NUGT':'تعدين الذهب ×2',
-'JNUG':'تعدين صغار الذهب ×2',
-'VXX':'عقود التقلب',
-'SVXY':'التقلب العكسي',
-'TSLL':'تسلا ×2',
-'NVDL':'إنفيديا ×2',
-'CONY':'كوين بيس دخل',
-'MSTY':'مايكرو ستراتيجي دخل',
-'NVDY':'إنفيديا دخل',
-'TSLY':'تسلا دخل',
-'ARKG':'آرك للجينوم',
-'ARKW':'آرك للإنترنت',
-'DJT':'ترامب ميديا',
-'TLRY':'تيلراي',
-'BB':'بلاك بيري',
-'NOK':'نوكيا',
-'CRCL':'سيركل'
+'UVXY':'مؤشر الخوف 1.5×'
 };
 
 /* خريطة القطاع لكل رمز — بديل استنتاج القطاع من أول حرف كما في
    السوق الأمريكي (حيث الرقم يحمل القطاع). في السوق الأمريكي الرمز
    حروف لا تدل على قطاع، فالخريطة صريحة. */
-const SECOF={'AAPL':'1','MSFT':'1','NVDA':'1','AVGO':'1','AMD':'1','INTC':'1','QCOM':'1','TXN':'1','MU':'1','ARM':'1','SMCI':'1','TSM':'1','ASML':'1','MRVL':'1','ON':'1','LRCX':'1','AMAT':'1','KLAC':'1','ADBE':'1','CRM':'1','ORCL':'1','NOW':'1','PLTR':'1','SNOW':'1','CRWD':'1','PANW':'1','ZS':'1','NET':'1','DDOG':'1','MDB':'1','ANET':'1','DELL':'1','IBM':'1','CSCO':'1','ACN':'1','INTU':'1','APP':'1','FTNT':'1','WDAY':'1','TEAM':'1','HPQ':'1','WDC':'1','GOOGL':'2','META':'2','NFLX':'2','DIS':'2','T':'2','VZ':'2','TMUS':'2','CMCSA':'2','WBD':'2','EA':'2','TTWO':'2','RDDT':'2','SPOT':'2','SNAP':'2','PINS':'2','AMZN':'3','TSLA':'3','HD':'3','LOW':'3','MCD':'3','SBUX':'3','NKE':'3','TGT':'3','BKNG':'3','ABNB':'3','MAR':'3','DKNG':'3','CMG':'3','LULU':'3','F':'3','GM':'3','RIVN':'3','LCID':'3','CVNA':'3','EBAY':'3','YUM':'3','TJX':'3','ROST':'3','DASH':'3','UBER':'3','WMT':'4','COST':'4','PG':'4','KO':'4','PEP':'4','PM':'4','MO':'4','MDLZ':'4','CL':'4','KMB':'4','GIS':'4','KHC':'4','STZ':'4','MNST':'4','EL':'4','LLY':'5','UNH':'5','JNJ':'5','ABBV':'5','MRK':'5','PFE':'5','TMO':'5','ABT':'5','AMGN':'5','GILD':'5','BMY':'5','VRTX':'5','REGN':'5','ISRG':'5','MRNA':'5','CVS':'5','CI':'5','DHR':'5','ZTS':'5','BIIB':'5','HIMS':'5','BRK-B':'6','JPM':'6','BAC':'6','WFC':'6','GS':'6','MS':'6','C':'6','SCHW':'6','BLK':'6','AXP':'6','V':'6','MA':'6','SPGI':'6','PGR':'6','KKR':'6','BX':'6','COF':'6','USB':'6','PNC':'6','PYPL':'6','COIN':'6','HOOD':'6','SOFI':'6','AFRM':'6','MSTR':'6','XYZ':'6','XOM':'7','CVX':'7','COP':'7','SLB':'7','EOG':'7','PSX':'7','MPC':'7','VLO':'7','OXY':'7','HAL':'7','DVN':'7','FANG':'7','WMB':'7','KMI':'7','OKE':'7','BA':'8','CAT':'8','DE':'8','GE':'8','HON':'8','UNP':'8','UPS':'8','FDX':'8','LMT':'8','RTX':'8','NOC':'8','GD':'8','MMM':'8','ETN':'8','PH':'8','CSX':'8','DAL':'8','UAL':'8','LUV':'8','URI':'8','PWR':'8','LIN':'9','APD':'9','SHW':'9','FCX':'9','NEM':'9','NUE':'9','DOW':'9','ECL':'9','ALB':'9','X':'9','CLF':'9','MP':'9','NEE':'10','DUK':'10','SO':'10','D':'10','AEP':'10','EXC':'10','SRE':'10','XEL':'10','VST':'10','CEG':'10','PLD':'11','AMT':'11','EQIX':'11','CCI':'11','SPG':'11','O':'11','PSA':'11','WELL':'11','DLR':'11','VICI':'11','SPY':'12','QQQ':'12','IWM':'12','DIA':'12','SMH':'12','XLK':'12','XLF':'12','XLE':'12','XLV':'12','XLI':'12','XLY':'12','XLP':'12','XLU':'12','XLC':'12','TQQQ':'12','SQQQ':'12','SOXL':'12','ARKK':'12','GLD':'12','SLV':'12','TLT':'12','USO':'12','EEM':'12','FXI':'12','IBIT':'12','UVXY':'12','GME':'3','AMC':'2','RIOT':'1','MARA':'1','CLSK':'1','HUT':'1','WULF':'1','CORZ':'1','APLD':'1','IONQ':'1','RGTI':'1','QBTS':'1','BBAI':'1','SOUN':'1','AI':'1','PATH':'1','S':'1','ESTC':'1','GTLB':'1','NBIS':'1','VRT':'8','WOLF':'1','LAZR':'3','QS':'3','ENVX':'1','CHPT':'3','PLUG':'10','NKLA':'3','FUBO':'2','OPEN':'11','UPST':'6','LMND':'6','PTON':'3','W':'3','CHWY':'3','ETSY':'3','ZM':'1','DOCU':'1','TWLO':'1','OKTA':'1','ROKU':'2','RBLX':'2','U':'1','SQ':'6','SHOP':'3','TTD':'2','NIO':'3','XPEV':'3','LI':'3','BABA':'3','PDD':'3','JD':'3','SE':'3','GRAB':'3','MELI':'3','NU':'6','RKLB':'8','ASTS':'2','ACHR':'8','JOBY':'8','LUNR':'8','OKLO':'10','SMR':'10','NNE':'10','FSLR':'1','ENPH':'1','RUN':'10','AAL':'8','CCL':'3','NCLH':'3','RCL':'3','VOO':'12','VTI':'12','IVV':'12','SCHD':'12','JEPI':'12','JEPQ':'12','TNA':'12','SPXL':'12','LABU':'12','YINN':'12','NUGT':'12','JNUG':'12','VXX':'12','SVXY':'12','TSLL':'12','NVDL':'12','CONY':'12','MSTY':'12','NVDY':'12','TSLY':'12','ARKG':'12','ARKW':'12','DJT':'2','TLRY':'5','BB':'1','NOK':'1','CRCL':'6'};
+const SECOF={'AAPL':'1','MSFT':'1','NVDA':'1','AVGO':'1','AMD':'1','INTC':'1','QCOM':'1','TXN':'1','MU':'1','ARM':'1','SMCI':'1','TSM':'1','ASML':'1','MRVL':'1','ON':'1','LRCX':'1','AMAT':'1','KLAC':'1','ADBE':'1','CRM':'1','ORCL':'1','NOW':'1','PLTR':'1','SNOW':'1','CRWD':'1','PANW':'1','ZS':'1','NET':'1','DDOG':'1','MDB':'1','ANET':'1','DELL':'1','IBM':'1','CSCO':'1','ACN':'1','INTU':'1','APP':'1','FTNT':'1','WDAY':'1','TEAM':'1','HPQ':'1','WDC':'1','GOOGL':'2','META':'2','NFLX':'2','DIS':'2','T':'2','VZ':'2','TMUS':'2','CMCSA':'2','WBD':'2','EA':'2','TTWO':'2','RDDT':'2','SPOT':'2','SNAP':'2','PINS':'2','AMZN':'3','TSLA':'3','HD':'3','LOW':'3','MCD':'3','SBUX':'3','NKE':'3','TGT':'3','BKNG':'3','ABNB':'3','MAR':'3','DKNG':'3','CMG':'3','LULU':'3','F':'3','GM':'3','RIVN':'3','LCID':'3','CVNA':'3','EBAY':'3','YUM':'3','TJX':'3','ROST':'3','DASH':'3','UBER':'3','WMT':'4','COST':'4','PG':'4','KO':'4','PEP':'4','PM':'4','MO':'4','MDLZ':'4','CL':'4','KMB':'4','GIS':'4','KHC':'4','STZ':'4','MNST':'4','EL':'4','LLY':'5','UNH':'5','JNJ':'5','ABBV':'5','MRK':'5','PFE':'5','TMO':'5','ABT':'5','AMGN':'5','GILD':'5','BMY':'5','VRTX':'5','REGN':'5','ISRG':'5','MRNA':'5','CVS':'5','CI':'5','DHR':'5','ZTS':'5','BIIB':'5','HIMS':'5','BRK-B':'6','JPM':'6','BAC':'6','WFC':'6','GS':'6','MS':'6','C':'6','SCHW':'6','BLK':'6','AXP':'6','V':'6','MA':'6','SPGI':'6','PGR':'6','KKR':'6','BX':'6','COF':'6','USB':'6','PNC':'6','PYPL':'6','COIN':'6','HOOD':'6','SOFI':'6','AFRM':'6','MSTR':'6','XYZ':'6','XOM':'7','CVX':'7','COP':'7','SLB':'7','EOG':'7','PSX':'7','MPC':'7','VLO':'7','OXY':'7','HAL':'7','DVN':'7','FANG':'7','WMB':'7','KMI':'7','OKE':'7','BA':'8','CAT':'8','DE':'8','GE':'8','HON':'8','UNP':'8','UPS':'8','FDX':'8','LMT':'8','RTX':'8','NOC':'8','GD':'8','MMM':'8','ETN':'8','PH':'8','CSX':'8','DAL':'8','UAL':'8','LUV':'8','URI':'8','PWR':'8','LIN':'9','APD':'9','SHW':'9','FCX':'9','NEM':'9','NUE':'9','DOW':'9','ECL':'9','ALB':'9','X':'9','CLF':'9','MP':'9','NEE':'10','DUK':'10','SO':'10','D':'10','AEP':'10','EXC':'10','SRE':'10','XEL':'10','VST':'10','CEG':'10','PLD':'11','AMT':'11','EQIX':'11','CCI':'11','SPG':'11','O':'11','PSA':'11','WELL':'11','DLR':'11','VICI':'11','SPY':'12','QQQ':'12','IWM':'12','DIA':'12','SMH':'12','XLK':'12','XLF':'12','XLE':'12','XLV':'12','XLI':'12','XLY':'12','XLP':'12','XLU':'12','XLC':'12','TQQQ':'12','SQQQ':'12','SOXL':'12','ARKK':'12','GLD':'12','SLV':'12','TLT':'12','USO':'12','EEM':'12','FXI':'12','IBIT':'12','UVXY':'12'};
 const SEC={"1": "التقنية وأشباه الموصلات", "2": "اتصالات وإعلام وترفيه", "3": "استهلاكي تقديري", "4": "استهلاكي أساسي", "5": "رعاية صحية وأدوية", "6": "مالية وبنوك", "7": "طاقة", "8": "صناعة ونقل ودفاع", "9": "مواد ومعادن", "10": "مرافق", "11": "عقارات (REITs)", "12": "صناديق ومؤشرات"};
 const secName=s=>SEC[SECOF[s]]||'أخرى';
 const STKS=Object.entries(NAMES).map(([s,n])=>({sym:s,name:n,sec:secName(s)}));
@@ -2178,7 +1044,7 @@ function ssKeyDown(e){
   else if(e.key==='Enter'){e.preventDefault();const pick=_ssActive>=0?_ssResults[_ssActive]:_ssResults[0];if(pick)ssPick(pick.sym);}
   else if(e.key==='Escape'){ssClear();document.getElementById('ss-input').blur();}
 }
-function ssHi(items){items.forEach((it,i)=>it.classList.toggle('ss-active',i===_ssActive));if(_ssActive>=0)items[_ssActive].scrollIntoView({block:'nearest'});}
+function ssHi(items){items.forEach((it,i)=>it.classList.toggle('ss-active',i===_ssActive));try{if(_ssActive>=0&&typeof items[_ssActive]?.scrollIntoView==='function')items[_ssActive].scrollIntoView({block:'nearest'});}catch(e){}}
 function ssClear(){
   document.getElementById('ss-input').value='';
   document.getElementById('stock-search').classList.remove('has-val');
@@ -2224,7 +1090,7 @@ document.addEventListener('click',(e)=>{
 const PRI=["SPY", "QQQ", "NVDA", "TSLA", "AAPL", "AMZN", "META", "MSFT", "AMD", "GOOGL", "PLTR", "NFLX", "AVGO", "COIN", "MSTR", "IWM", "SMCI", "MU", "BAC", "SOFI"];
 /* ⚠️ أسعار هيكلية تقريبية — غرضها الوحيد رسم هيكل مؤقت قبل وصول
    بيانات السوق. المنصة تمنع أي تحليل على سهم ما زال عليها. */
-const BPX={'AAPL':225,'MSFT':470,'NVDA':175,'AVGO':330,'AMD':160,'INTC':28,'QCOM':165,'TXN':200,'MU':130,'ARM':135,'SMCI':42,'TSM':210,'ASML':800,'MRVL':95,'ON':70,'LRCX':95,'AMAT':190,'KLAC':800,'ADBE':400,'CRM':270,'ORCL':190,'NOW':950,'PLTR':120,'SNOW':180,'CRWD':380,'PANW':190,'ZS':200,'NET':150,'DDOG':130,'MDB':250,'ANET':110,'DELL':120,'IBM':250,'CSCO':62,'ACN':330,'INTU':640,'APP':380,'FTNT':95,'WDAY':240,'TEAM':210,'HPQ':32,'WDC':65,'GOOGL':180,'META':620,'NFLX':900,'DIS':100,'T':26,'VZ':42,'TMUS':230,'CMCSA':38,'WBD':10,'EA':150,'TTWO':200,'RDDT':140,'SPOT':620,'SNAP':11,'PINS':33,'AMZN':220,'TSLA':330,'HD':380,'LOW':250,'MCD':300,'SBUX':95,'NKE':72,'TGT':100,'BKNG':5000,'ABNB':130,'MAR':270,'DKNG':40,'CMG':50,'LULU':300,'F':11,'GM':52,'RIVN':13,'LCID':2.5,'CVNA':300,'EBAY':68,'YUM':140,'TJX':125,'ROST':145,'DASH':180,'UBER':78,'WMT':95,'COST':950,'PG':165,'KO':70,'PEP':145,'PM':175,'MO':58,'MDLZ':62,'CL':88,'KMB':130,'GIS':55,'KHC':27,'STZ':180,'MNST':58,'EL':80,'LLY':800,'UNH':320,'JNJ':160,'ABBV':200,'MRK':85,'PFE':25,'TMO':520,'ABT':130,'AMGN':290,'GILD':110,'BMY':50,'VRTX':450,'REGN':600,'ISRG':530,'MRNA':28,'CVS':65,'CI':300,'DHR':210,'ZTS':160,'BIIB':140,'HIMS':45,'BRK-B':480,'JPM':270,'BAC':46,'WFC':75,'GS':620,'MS':130,'C':78,'SCHW':80,'BLK':1000,'AXP':300,'V':340,'MA':540,'SPGI':520,'PGR':250,'KKR':130,'BX':165,'COF':190,'USB':48,'PNC':190,'PYPL':75,'COIN':280,'HOOD':70,'SOFI':18,'AFRM':65,'MSTR':350,'XYZ':70,'XOM':115,'CVX':155,'COP':100,'SLB':42,'EOG':125,'PSX':125,'MPC':160,'VLO':135,'OXY':48,'HAL':25,'DVN':35,'FANG':160,'WMB':55,'KMI':27,'OKE':95,'BA':180,'CAT':380,'DE':470,'GE':200,'HON':215,'UNP':235,'UPS':120,'FDX':255,'LMT':450,'RTX':125,'NOC':500,'GD':290,'MMM':140,'ETN':320,'PH':680,'CSX':33,'DAL':58,'UAL':95,'LUV':30,'URI':720,'PWR':320,'LIN':460,'APD':290,'SHW':350,'FCX':45,'NEM':55,'NUE':125,'DOW':30,'ECL':250,'ALB':85,'X':38,'CLF':12,'MP':30,'NEE':75,'DUK':115,'SO':90,'D':55,'AEP':100,'EXC':40,'SRE':85,'XEL':70,'VST':150,'CEG':250,'PLD':110,'AMT':200,'EQIX':850,'CCI':100,'SPG':175,'O':57,'PSA':300,'WELL':140,'DLR':165,'VICI':32,'SPY':600,'QQQ':520,'IWM':230,'DIA':440,'SMH':260,'XLK':240,'XLF':50,'XLE':90,'XLV':140,'XLI':140,'XLY':220,'XLP':80,'XLU':80,'XLC':105,'TQQQ':85,'SQQQ':25,'SOXL':30,'ARKK':65,'GLD':300,'SLV':32,'TLT':90,'USO':75,'EEM':47,'FXI':35,'IBIT':60,'UVXY':20,'GME':24,'AMC':4.5,'RIOT':12,'MARA':18,'CLSK':10,'HUT':22,'WULF':6,'CORZ':14,'APLD':12,'IONQ':40,'RGTI':15,'QBTS':18,'BBAI':5,'SOUN':12,'AI':22,'PATH':13,'S':20,'ESTC':95,'GTLB':48,'NBIS':45,'VRT':120,'WOLF':6,'LAZR':5,'QS':7,'ENVX':9,'CHPT':1.2,'PLUG':2.5,'NKLA':1,'FUBO':3.5,'OPEN':2,'UPST':60,'LMND':40,'PTON':8,'W':75,'CHWY':35,'ETSY':55,'ZM':80,'DOCU':80,'TWLO':110,'OKTA':95,'ROKU':75,'RBLX':60,'U':25,'SQ':70,'SHOP':110,'TTD':60,'NIO':6,'XPEV':20,'LI':25,'BABA':115,'PDD':120,'JD':35,'SE':150,'GRAB':5,'MELI':2200,'NU':13,'RKLB':25,'ASTS':30,'ACHR':9,'JOBY':8,'LUNR':12,'OKLO':60,'SMR':25,'NNE':30,'FSLR':190,'ENPH':40,'RUN':10,'AAL':13,'CCL':25,'NCLH':22,'RCL':240,'VOO':540,'VTI':290,'IVV':600,'SCHD':27,'JEPI':58,'JEPQ':55,'TNA':35,'SPXL':170,'LABU':85,'YINN':35,'NUGT':60,'JNUG':55,'VXX':50,'SVXY':45,'TSLL':12,'NVDL':60,'CONY':12,'MSTY':22,'NVDY':18,'TSLY':10,'ARKG':25,'ARKW':95,'DJT':25,'TLRY':1.5,'BB':4,'NOK':5,'CRCL':85};
+const BPX={'AAPL':225,'MSFT':470,'NVDA':175,'AVGO':330,'AMD':160,'INTC':28,'QCOM':165,'TXN':200,'MU':130,'ARM':135,'SMCI':42,'TSM':210,'ASML':800,'MRVL':95,'ON':70,'LRCX':95,'AMAT':190,'KLAC':800,'ADBE':400,'CRM':270,'ORCL':190,'NOW':950,'PLTR':120,'SNOW':180,'CRWD':380,'PANW':190,'ZS':200,'NET':150,'DDOG':130,'MDB':250,'ANET':110,'DELL':120,'IBM':250,'CSCO':62,'ACN':330,'INTU':640,'APP':380,'FTNT':95,'WDAY':240,'TEAM':210,'HPQ':32,'WDC':65,'GOOGL':180,'META':620,'NFLX':900,'DIS':100,'T':26,'VZ':42,'TMUS':230,'CMCSA':38,'WBD':10,'EA':150,'TTWO':200,'RDDT':140,'SPOT':620,'SNAP':11,'PINS':33,'AMZN':220,'TSLA':330,'HD':380,'LOW':250,'MCD':300,'SBUX':95,'NKE':72,'TGT':100,'BKNG':5000,'ABNB':130,'MAR':270,'DKNG':40,'CMG':50,'LULU':300,'F':11,'GM':52,'RIVN':13,'LCID':2.5,'CVNA':300,'EBAY':68,'YUM':140,'TJX':125,'ROST':145,'DASH':180,'UBER':78,'WMT':95,'COST':950,'PG':165,'KO':70,'PEP':145,'PM':175,'MO':58,'MDLZ':62,'CL':88,'KMB':130,'GIS':55,'KHC':27,'STZ':180,'MNST':58,'EL':80,'LLY':800,'UNH':320,'JNJ':160,'ABBV':200,'MRK':85,'PFE':25,'TMO':520,'ABT':130,'AMGN':290,'GILD':110,'BMY':50,'VRTX':450,'REGN':600,'ISRG':530,'MRNA':28,'CVS':65,'CI':300,'DHR':210,'ZTS':160,'BIIB':140,'HIMS':45,'BRK-B':480,'JPM':270,'BAC':46,'WFC':75,'GS':620,'MS':130,'C':78,'SCHW':80,'BLK':1000,'AXP':300,'V':340,'MA':540,'SPGI':520,'PGR':250,'KKR':130,'BX':165,'COF':190,'USB':48,'PNC':190,'PYPL':75,'COIN':280,'HOOD':70,'SOFI':18,'AFRM':65,'MSTR':350,'XYZ':70,'XOM':115,'CVX':155,'COP':100,'SLB':42,'EOG':125,'PSX':125,'MPC':160,'VLO':135,'OXY':48,'HAL':25,'DVN':35,'FANG':160,'WMB':55,'KMI':27,'OKE':95,'BA':180,'CAT':380,'DE':470,'GE':200,'HON':215,'UNP':235,'UPS':120,'FDX':255,'LMT':450,'RTX':125,'NOC':500,'GD':290,'MMM':140,'ETN':320,'PH':680,'CSX':33,'DAL':58,'UAL':95,'LUV':30,'URI':720,'PWR':320,'LIN':460,'APD':290,'SHW':350,'FCX':45,'NEM':55,'NUE':125,'DOW':30,'ECL':250,'ALB':85,'X':38,'CLF':12,'MP':30,'NEE':75,'DUK':115,'SO':90,'D':55,'AEP':100,'EXC':40,'SRE':85,'XEL':70,'VST':150,'CEG':250,'PLD':110,'AMT':200,'EQIX':850,'CCI':100,'SPG':175,'O':57,'PSA':300,'WELL':140,'DLR':165,'VICI':32,'SPY':600,'QQQ':520,'IWM':230,'DIA':440,'SMH':260,'XLK':240,'XLF':50,'XLE':90,'XLV':140,'XLI':140,'XLY':220,'XLP':80,'XLU':80,'XLC':105,'TQQQ':85,'SQQQ':25,'SOXL':30,'ARKK':65,'GLD':300,'SLV':32,'TLT':90,'USO':75,'EEM':47,'FXI':35,'IBIT':60,'UVXY':20};
 const gBase=s=>BPX[s]||100;
 /* 🛠️ البيانات التجريبية صارت حتمية لكل رمز بدل عشوائية بالكامل.
    سببان: (1) الأرقام العشوائية كانت تتغيّر مع كل إعادة تحميل، فتبدو
@@ -2361,64 +1227,20 @@ const OPT = {
 /** قائمة المراقبة لتبويب الأوبشن: الأسهم ذات السلاسل الأسبوعية النشطة.
  *  المسح على 238 رمزاً يستهلك حصص المزوّد بلا فائدة — أغلبها بلا سيولة
  *  أوبشن تُذكر. PRI هي القائمة التي يُتداول عليها فعلاً. */
-/** الرموز التي تُمسح عقودها. الاختيار ليس «الأشهر» بل الأعلى سيولةً في سوق
- *  العقود تحديداً — لأن عقداً على شركة عظيمة بفارق عرض/طلب 20٪ صفقة خاسرة
- *  من لحظة التنفيذ. الترتيب: مؤشرات ← رقائق ← تقنية كبرى ← عالية التذبذب
- *  ← مالية ← بقية القطاعات. كل رمز يحتاج طلب شبكة مستقلاً، ولذلك القائمة
- *  محدودة بستين بدل مسح كل الأسهم. */
-const OPT_UNIVERSE = [
-  /* مؤشرات وصناديق — الأعلى سيولةً على الإطلاق في العقود الأسبوعية */
-  'SPY','QQQ','IWM','DIA','SMH','XLF','XLE','GLD','TLT','SLV','IBIT','TQQQ','SQQQ','SOXL','UVXY','ARKK',
-  /* أشباه الموصلات */
-  'NVDA','AMD','AVGO','MU','INTC','TSM','ARM','SMCI','MRVL','QCOM',
-  /* تقنية كبرى */
-  'AAPL','MSFT','AMZN','GOOGL','META','NFLX','TSLA','ORCL','CRM','PLTR','UBER','SHOP',
-  /* عالية التذبذب — الأكثر طلباً للأسبوعي */
-  'MSTR','COIN','GME','AMC','SOFI','HOOD','RIOT','MARA','CVNA','AFRM','RBLX','DKNG','SNAP','LCID','RIVN','NIO','IONQ','RKLB',
-  /* مالية */
-  'JPM','BAC','GS','WFC','C','V','MA',
-  /* قطاعات أخرى ذات عقود نشطة */
-  'BA','XOM','CVX','DIS','WMT','COST','LLY','UNH','PFE','F','T','AAL','CCL'
-];
-
 function optWatchlist() {
-  /* لا نُدرج رمزاً غير موجود في قائمة الأسهم — وإلا فشل الجلب بلا سبب مفهوم */
-  const known = typeof NAMES !== 'undefined' ? OPT_UNIVERSE.filter(s => NAMES[s]) : OPT_UNIVERSE;
-  return [...new Set([...(typeof PRI !== 'undefined' ? PRI : []), ...known])];
+  const extra = ['GOOGL', 'MSFT', 'AAPL', 'AMZN', 'META', 'NVDA', 'TSLA', 'AMD', 'SPY', 'QQQ'];
+  return [...new Set([...(typeof PRI !== 'undefined' ? PRI : []), ...extra])];
 }
 
 /* ══ 1) الجلب ══════════════════════════════════════════════════════════ */
 
-/** يجلب سلسلة العقود. الترتيب مقصود: يُجرّب خادم محلي `/api/options` أولاً
- *  إن وُجد (أسرع وبلا حدود معدّل)، وإلا يسقط إلى ياهو عبر وسطاء CORS —
- *  نفس الوسطاء المستخدمين لشموع السهم. بلا هذا السقوط لا يعمل تبويب
- *  الأوبشن إطلاقاً حين يُفتح الملف مباشرةً من القرص بلا خادم. */
 async function optFetchChain(sym, expiryTs) {
   const key = `${sym}|${expiryTs || 'first'}`;
   if (OPT.chains[key]) return OPT.chains[key];
-
-  const yUrl = `https://query1.finance.yahoo.com/v7/finance/options/${encodeURIComponent(sym)}`
-             + (expiryTs ? `?date=${expiryTs}` : '');
-  const attempts = [
-    `/api/options?symbol=${encodeURIComponent(sym)}` + (expiryTs ? `&date=${expiryTs}` : ''),
-    'https://api.allorigins.win/raw?url=' + encodeURIComponent(yUrl),
-    'https://corsproxy.io/?' + encodeURIComponent(yUrl)
-  ];
-
-  let d = null, lastErr = '';
-  for (const url of attempts) {
-    try {
-      const rsp = await fetch(url, { signal: AbortSignal.timeout(15000), cache: 'no-store' });
-      if (!rsp.ok) { lastErr = `المصدر أعاد ${rsp.status}`; continue; }
-      const j = await rsp.json();
-      if (j?.optionChain?.result?.[0]) { d = j; break; }
-      lastErr = j?.optionChain?.error?.description || j?.error || 'استجابة بلا سلسلة عقود';
-    } catch (e) {
-      lastErr = /abort|timeout/i.test(e.message || '') ? 'انتهت مهلة الطلب' : (e.message || 'تعذّر الاتصال');
-    }
-  }
-  if (!d) throw new Error(lastErr || 'تعذّر جلب سلسلة العقود من أي مصدر');
-
+  const url = `/api/options?symbol=${encodeURIComponent(sym)}` + (expiryTs ? `&date=${expiryTs}` : '');
+  const rsp = await fetch(url, { signal: AbortSignal.timeout(15000), cache: 'no-store' });
+  if (!rsp.ok) throw new Error(`الخادم أعاد ${rsp.status}`);
+  const d = await rsp.json();
   const res = d?.optionChain?.result?.[0];
   if (!res) throw new Error(d?.error || d?.optionChain?.error?.description || 'لا توجد سلسلة عقود لهذا الرمز');
   const node = res.options?.[0];
@@ -2797,10 +1619,7 @@ function optShowDetail(sym) {
       <div style="font-weight:700;margin-bottom:5px;font-size:12px">🌀 الفراكتال والاتجاه</div>
       <div style="${R}">
         ${m.frac?.ok ? `أقرب قمة فراكتالية حيّة <b>${optNum(m.frac.target1)}$</b> · دعم فراكتالي <b>${optNum(m.frac.support)}$</b> · ${m.frac.cleanRunway ? '<span style="color:#0ecf7e">مساحة نظيفة فوق السعر</span>' : 'لا توجد مساحة نظيفة — قمم متلاصقة أعلاه'}` : 'أهداف الفراكتال غير متاحة'}<br>
-        الاتجاه: ${m.dir?.forced ? 'مفروض يدوياً'
-          : (m.dir?.agreement != null && m.dir?.votes?.length)
-            ? `<b>${m.dir.dirUp ? 'صاعد' : 'هابط'}</b> بإجماع ${m.dir.agreement}٪ من ${m.dir.votes.length} أدلة مستقلة`
-            : `<b>${p.type === 'call' ? 'صاعد' : 'هابط'}</b> <span style="color:var(--t3)">(تفصيل الأدلة غير متاح)</span>`}
+        الاتجاه: ${m.dir?.forced ? 'مفروض يدوياً' : `<b>${m.dir?.dirUp ? 'صاعد' : 'هابط'}</b> بإجماع ${m.dir?.agreement}٪ من ${m.dir?.votes?.length} أدلة مستقلة`}
         ${m.dir?.votes?.length ? `<div style="font-size:10.5px;color:var(--t3);margin-top:3px">${m.dir.votes.map(v => `${v.up ? '↑' : '↓'} ${v.name}`).join(' · ')}</div>` : ''}
       </div>
     </div>
@@ -4652,7 +3471,9 @@ function setFocusedRow(idx){
   _focusedIdx=idx;
   document.querySelectorAll('#rtbody tr[data-idx]').forEach(tr=>tr.classList.remove('kb-focus'));
   const tr=document.querySelector(`#rtbody tr[data-idx="${idx}"]`);
-  if(tr){tr.classList.add('kb-focus');tr.scrollIntoView({block:'nearest',behavior:'smooth'});}
+  /* 🛠️ scrollIntoView غير موجودة في كل بيئات العرض (متصفحات قديمة/webviews).
+     استدعاؤها بلا حارس كان يرمي استثناءً يوقف التنقّل بالكيبورد كلياً. */
+  if(tr){tr.classList.add('kb-focus');try{if(typeof tr.scrollIntoView==='function')tr.scrollIntoView({block:'nearest',behavior:'smooth'});}catch(e){}}
 }
 
 function moveFocus(delta){
@@ -4970,7 +3791,12 @@ function renderResults(){
     </tr>`;
   }).join('');
 
-  document.getElementById('rtbody').innerHTML=rows||'<tr><td colspan="20" class="empty-msg">اضغط "مسح شامل" لبدء الفحص</td></tr>';
+  document.getElementById('rtbody').innerHTML=rows||`<tr><td colspan="20" class="empty-msg" style="line-height:2.1">
+    <div style="font-size:30px;margin-bottom:6px"><span class="spinner" style="display:inline-block;vertical-align:middle"></span></div>
+    <b style="color:#e6e9f0;font-size:13px">المسح التلقائي يعمل الآن…</b><br>
+    <span style="font-size:11px">يجلب أسعار ${STKS.length} سهماً ويحلّلها. قد يستغرق نصف دقيقة على شبكة الجوال.</span><br>
+    <span style="font-size:11px;color:#7a8ba8">إن لم يظهر شيء، اضغط «🔬 مسح شامل» يدوياً.</span>
+  </td></tr>`;
 }
 
 /* ══ CHART ENGINE ══ */
@@ -6148,18 +4974,9 @@ function ibSel(sym){
 }
 
 
-window.addEventListener('load',()=>{
-  const CDNs=['https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js','https://cdnjs.cloudflare.com/ajax/libs/lightweight-charts/4.1.0/lightweight-charts.standalone.production.js'];
-  let ci=0;
-  function tryI(){
-    if(typeof LightweightCharts!=='undefined'){requestAnimationFrame(()=>requestAnimationFrame(init));return;}
-    if(ci>=CDNs.length){init();return;}
-    const s=document.createElement('script');s.src=CDNs[ci++];
-    s.onload=()=>{if(typeof LightweightCharts!=='undefined')requestAnimationFrame(()=>requestAnimationFrame(init));else tryI();};
-    s.onerror=()=>tryI();document.head.appendChild(s);
-  }
-  tryI();
-});
+/* ⚠️ أُزيل مُقلِع 'load' القديم — كان ينتظر اكتمال كل المصادر الخارجية
+   (خط جوجل + مكتبة الشارت). على شبكة جوال بطيئة أو محجوبة لا يقع الحدث
+   أبداً فلا يُستدعى init ولا تُبنى القائمة. البديل المحصّن في bootPro بالأسفل. */
 
 // ═════════════════════════════════════════════════════════════════════
 // 🎯 نظام التحليل الاحترافي المتقدم
@@ -8862,6 +7679,869 @@ window.ddReport = ddReport2;
 window.smartPrediction = smartPredictionAdvanced;
 window.smartPricing = smartPricingAdvanced;
 window.smartTimingAnalysis = smartTimingAnalysis;
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ⚡ PRO PATCH — طبقة التنفيذ والتنبيه والجوال
+   ──────────────────────────────────────────────────────────────────────────
+   هذه الطبقة لا تخترع أرقاماً جديدة. كل رقم تعرضه مأخوذ من المحرّكات
+   الموجودة أصلاً (calcTradePlan / ddLaunch / ddTiming / ddFrac / ddEvidence).
+   وظيفتها ثلاث فقط:
+     ١) تُظهر المنصة على الجوال (كانت لا تُقلع أصلاً — انظر bootPro).
+     ٢) تُترجم التحليل إلى جملة تنفيذية واحدة: ادخل / لا تدخل / متى تخرج.
+     ٣) تراقب ما سلّحته وتنبّهك عند نقاط محدّدة مسبقاً — لا «تنبؤ»، بل
+        شروط مكتوبة قبل الدخول وتُفحص كل دقيقة.
+
+   ⚠️ حدود صريحة: لا شيء هنا يسبق السوق ولا يعرف القمة قبل وقوعها.
+   ما تفعله المنصة أنها تُجهّز الشرط قبل حدوثه وتنبّهك لحظة تحقّقه،
+   وتمنعك من الدخول بلا وقف. هذا كل ما يمكن لأداة أن تفعله بصدق.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const PRO = {
+  view: 'list',
+  mobile: false,
+  cards: true,          /* وضع البطاقات — «ادخل هنا» بدل جدول الأرقام */
+  brainOn: false,
+  TOP_N: 20,
+  actIdx: 0,
+  alerts: { armed: [], log: [], unread: 0, timer: null, pollMs: 60000 },
+  _ac: null,
+
+  /* ────────── إقلاع ────────── */
+  init() {
+    this.detectMobile();
+    window.addEventListener('resize', () => this.detectMobile());
+    window.addEventListener('orientationchange', () => setTimeout(() => this.detectMobile(), 250));
+    this.loadAlerts();
+    this.startWatcher();
+    this.injectTopBar();
+    document.body.classList.toggle('mb-on', this.brainOn);
+    const ibEl = document.getElementById('ib');
+    if (ibEl) ibEl.classList.toggle('mb-on', this.brainOn);
+    setTimeout(() => this.dataHealthCheck(), 9000);
+    if (!window.KSAEngine) {
+      /* بدون /engine/core.js تتعطّل بصمت: الدورة الطيفية، أهداف الفراكتال،
+         وتنظيف الشموع. الصمت هنا أخطر من العطل نفسه. */
+      setTimeout(() => this.toast('dn', '⚙️', 'محرّك التحليل غير محمَّل',
+        'ملف /engine/core.js لم يصل. التحليل الزمني (الدورة الطيفية) وأهداف الفراكتال معطّلة، وستُستخدم أهداف هيكلية بديلة.'), 2500);
+    }
+  },
+
+  detectMobile() {
+    const m = window.matchMedia('(max-width:900px)').matches;
+    if (m === this.mobile) return;
+    this.mobile = m;
+    document.body.classList.toggle('mobile', m);
+    if (m) { this.cards = true; this.setView(this.view || 'list'); }
+    else { document.body.removeAttribute('data-view'); }
+    if (G.lwChart) {
+      const ct = document.getElementById('lw-chart');
+      if (ct) setTimeout(() => G.lwChart.applyOptions({ width: ct.clientWidth, height: ct.clientHeight }), 80);
+    }
+  },
+
+  setView(v) {
+    this.view = v;
+    document.body.setAttribute('data-view', v);
+    document.querySelectorAll('.mnav-i').forEach(i => i.classList.toggle('on', i.dataset.v === v));
+    if (v === 'chart' && G.lwChart) {
+      const ct = document.getElementById('lw-chart');
+      setTimeout(() => { G.lwChart.applyOptions({ width: ct.clientWidth, height: ct.clientHeight }); G.lwChart.timeScale().fitContent(); }, 90);
+    }
+  },
+
+  goDecision() {
+    this.setView('list');
+    const tab = [...document.querySelectorAll('.ftab')].find(t => t.textContent.includes('غرفة القرار'));
+    if (tab) setFilter('decision', tab);
+    const ftabs = document.getElementById('ftabs');
+    if (ftabs && tab) tab.scrollIntoView({ inline: 'center', block: 'nearest' });
+  },
+
+  /* ────────── Market Brain: مخفي، ينفتح بالنقر ────────── */
+  toggleBrain() {
+    this.brainOn = !this.brainOn;
+    const ib = document.getElementById('ib');
+    document.body.classList.toggle('mb-on', this.brainOn);
+    if (ib) {
+      ib.classList.toggle('mb-on', this.brainOn);
+      if (this.brainOn && ib.classList.contains('closed') && typeof toggleIB === 'function') toggleIB();
+      if (!this.brainOn) { ib.classList.remove('opened'); ib.classList.add('closed'); const b = document.getElementById('ib-bd'); if (b) b.classList.remove('open'); _ibO = false; }
+    }
+    const fab = document.getElementById('mb-fab');
+    if (fab) fab.classList.toggle('hide', this.brainOn);
+    if (G.lwChart) { const ct = document.getElementById('lw-chart'); if (ct) setTimeout(() => G.lwChart.applyOptions({ width: ct.clientWidth, height: ct.clientHeight }), 320); }
+  },
+
+  toggleCards() {
+    this.cards = !this.cards;
+    const b = document.getElementById('dd-cards-btn');
+    if (b) b.textContent = this.cards ? '📊 عرض جدول' : '🃏 عرض بطاقات';
+    if (_filter === 'decision') renderResults();
+  },
+
+  /* ────────── شريط علوي: جرس التنبيهات ────────── */
+  injectTopBar() {
+    const host = document.querySelector('.top-r');
+    if (!host || document.getElementById('pro-bell')) return;
+    const bell = document.createElement('span');
+    bell.id = 'pro-bell';
+    bell.className = 'alert-chip';
+    bell.style.cssText = 'cursor:pointer;font-size:16px;padding:2px 4px';
+    bell.innerHTML = '🔔<span class="badge" id="pro-bell-badge" style="display:none">0</span>';
+    bell.onclick = () => PRO.toggleAlertPanel();
+    host.insertBefore(bell, host.firstChild);
+  },
+
+  /* ────────── فحص صحة البيانات ────────── */
+  dataHealthCheck() {
+    const total = STKS.length, demo = G.demo.size;
+    const el = document.getElementById('demo-warn');
+    if (demo > total * 0.7) {
+      if (el) {
+        el.style.display = 'flex';
+        el.textContent = `⚠️ ${demo} من ${total} سهم على بيانات تجريبية — خدمة الأسعار (/api/stock) لا تستجيب. الأرقام المعروضة ليست أسعاراً حقيقية.`;
+      }
+      this.toast('dn', '⚠️', 'بيانات غير حقيقية', 'خدمة الأسعار لا تستجيب. لا تبنِ أي قرار على الأرقام الحالية.');
+    } else if (el && demo === 0) el.style.display = 'none';
+  },
+
+  warn(step, e) { console.error('[PRO]', step, e); },
+
+  /* ══════════════════════════════════════════════════════════════
+     🔔 محرّك التنبيهات
+     كل تنبيه = شرط سعري أو زمني كُتب قبل الدخول، ويُفحص كل دقيقة.
+     ══════════════════════════════════════════════════════════════ */
+  loadAlerts() {
+    try {
+      const d = JSON.parse(localStorage.getItem('pro_alerts') || 'null');
+      if (d) { this.alerts.armed = d.armed || []; this.alerts.log = d.log || []; }
+    } catch (e) { }
+    this.renderAlertPanel();
+  },
+  saveAlerts() {
+    try {
+      localStorage.setItem('pro_alerts', JSON.stringify({
+        armed: this.alerts.armed.slice(-40),
+        log: this.alerts.log.slice(-120)
+      }));
+    } catch (e) { }
+  },
+
+  arm(sym) {
+    const r = (DD.results || []).find(x => x.sym === sym);
+    if (!r) { this.toast('dn', '⚠️', 'لا قرار محسوب', 'اضغط «🧭 احسب القرارات» أولاً.'); return; }
+    const t = r.timing || {};
+    const a = {
+      sym: r.sym, name: r.name, mode: r.mode || DD.mode,
+      entry: +r.execPrice, stop: +r.tp.stop, target: +r.finalTarget,
+      qty: r.qty || 0, action: r.action, label: r.label,
+      cyclePeak: (t.ok && t.significant && t.cyclePos != null) ? +t.cyclePos : null,
+      valleyBars: t.nextValley ? t.nextValley.barsAhead : null,
+      period: t.period || null,
+      armedAt: Date.now(), fired: {}
+    };
+    const i = this.alerts.armed.findIndex(x => x.sym === sym);
+    if (i >= 0) this.alerts.armed[i] = a; else this.alerts.armed.push(a);
+    this.saveAlerts(); this.renderAlertPanel();
+    this.askPermission(); this.beep(760);
+    this.toast('up', '🎯', `تم تسليح ${sym}`,
+      `سأنبّهك عند: اقتراب ${a.entry}$ · تفعيل الدخول · كسر الوقف ${a.stop}$ · بلوغ الهدف ${a.target}$` +
+      (a.valleyBars != null ? ` · فتح النافذة الزمنية (بعد ${a.valleyBars} جلسة)` : ''));
+    this.checkArmed();
+  },
+  disarm(sym) {
+    this.alerts.armed = this.alerts.armed.filter(a => a.sym !== sym);
+    this.saveAlerts(); this.renderAlertPanel();
+  },
+  isArmed(sym) { return this.alerts.armed.some(a => a.sym === sym); },
+
+  askPermission() {
+    try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { }
+  },
+
+  startWatcher() {
+    if (this.alerts.timer) clearInterval(this.alerts.timer);
+    this.alerts.timer = setInterval(() => this.pollArmed(), this.alerts.pollMs);
+  },
+
+  async pollArmed() {
+    const list = this.alerts.armed.slice(0, 12);
+    if (!list.length) return;
+    const live = document.getElementById('ap-live');
+    if (live) live.textContent = '⟳ تحديث…';
+    await Promise.allSettled(list.map(a => loadStock(a.sym)));
+    if (live) live.textContent = '● يراقب · ' + Tm();
+    this.checkArmed();
+  },
+
+  checkArmed() {
+    for (const a of this.alerts.armed) {
+      const p = G.pr[a.sym];
+      if (!isFinite(p) || G.demo.has(a.sym)) continue;
+      const f = a.fired || (a.fired = {});
+
+      /* ① كسر الوقف — الأولوية القصوى، خروج بلا نقاش */
+      if (!f.stop && p <= a.stop) {
+        f.stop = 1; this.fire('dn', '🛑', `${a.sym} — اخرج الآن`,
+          `السعر ${p}$ كسر وقفك ${a.stop}$. الخروج قاعدة كُتبت قبل الدخول، لا قرار يُعاد تقييمه الآن.`);
+      }
+      /* ② بلوغ الهدف — بِع النصف وأمّن الباقي */
+      if (!f.tgt && p >= a.target) {
+        f.tgt = 1; this.fire('up', '🎯', `${a.sym} — الهدف تحقّق`,
+          `السعر ${p}$ بلغ هدفك ${a.target}$. بِع النصف وارفع الوقف إلى سعر دخولك ${a.entry}$.`);
+      }
+      /* ③ قرب الهدف (٩٨٪ من المسافة) — تجهيز الخروج قبل الازدحام */
+      if (!f.near && !f.tgt && a.target > a.entry && p >= a.entry + (a.target - a.entry) * 0.9) {
+        f.near = 1; this.fire('up', '⚠️', `${a.sym} — على بُعد خطوة من الهدف`,
+          `السعر ${p}$ قطع ٩٠٪ من المسافة إلى ${a.target}$. جهّز أمر البيع الآن، لا بعد أن يرتد.`);
+      }
+      /* ④ تفعيل الدخول — أمر موقوف فوق الزناد */
+      if (!f.trig && (a.action === 'buy_stop' || a.action === 'wait' || a.action === 'watch') && p >= a.entry) {
+        f.trig = 1; this.fire('up', '🚀', `${a.sym} — الزناد تفعّل`,
+          `السعر ${p}$ تجاوز ${a.entry}$. هذا هو شرط الدخول الذي كتبته. الوقف ${a.stop}$ · الهدف ${a.target}$.`);
+      }
+      /* ⑤ اقتراب منطقة الدخول (±١٪) */
+      if (!f.zone && Math.abs(p - a.entry) / a.entry <= 0.01) {
+        f.zone = 1; this.fire('up', '📍', `${a.sym} — في منطقة الدخول`,
+          `السعر ${p}$ على بُعد أقل من ١٪ من ${a.entry}$. راقب الشمعة، لا تطارد.`);
+      }
+      /* ⑥ خروج مبكر: انهيار الأساس تحت الدخول بلا كسر وقف */
+      if (!f.fade && p < a.entry * 0.985 && a.action === 'buy') {
+        f.fade = 1; this.fire('dn', '📉', `${a.sym} — الفكرة تتآكل`,
+          `السعر ${p}$ نزل ١.٥٪ تحت دخولك بلا كسر وقف. إن أغلق تحت ${a.entry}$ فالسبب الذي دخلت لأجله انتفى — راجع الصفقة.`);
+      }
+    }
+    this.saveAlerts();
+    this.renderAlertPanel();
+    this.checkTimeWindows();
+  },
+
+  /* التنبيهات الزمنية — تُشتق من ddTiming (الدورة الطيفية) و tat (توافق غان/فيبوناتشي) */
+  checkTimeWindows() {
+    const today = new Date().toDateString();
+    for (const a of this.alerts.armed) {
+      const f = a.fired || (a.fired = {});
+      let tm = null;
+      try { tm = ddTiming(a.sym); } catch (e) { }
+      if (!tm || !tm.ok || !tm.significant) continue;
+
+      if (!f.win && tm.nextValley && tm.nextValley.barsAhead <= 1) {
+        f.win = 1; this.fire('up', '⏱', `${a.sym} — النافذة الزمنية تفتح`,
+          `الدورة المقيسة ${tm.period} جلسة تضع القاع المتوقع خلال ${tm.nextValley.barsAhead}±${tm.nextValley.sdBars} جلسة. ` +
+          `هذه نافذة احتمالية لا موعد — تُستخدم لترجيح الدخول، لا للدخول وحدها.`);
+      }
+      if (!f.peak && tm.cyclePos != null && tm.cyclePos <= 12 && !tm.risingPhase) {
+        f.peak = 1; this.fire('dn', '🔺', `${a.sym} — قرب قمة الدورة`,
+          `الموقع داخل الدورة ${tm.cyclePos}٪ (٠٪ = قمة) والمرحلة هابطة. إن كنت رابحاً فهذه نقطة تخفيف، لا إضافة.`);
+      }
+      if (!f.dailyKey || f.dailyKey !== today) f.dailyKey = today;
+    }
+    this.saveAlerts();
+  },
+
+  fire(kind, icon, title, body) {
+    this.alerts.log.unshift({ kind, icon, title, body, t: Date.now() });
+    this.alerts.log = this.alerts.log.slice(0, 120);
+    this.alerts.unread++;
+    this.toast(kind, icon, title, body);
+    this.beep(kind === 'dn' ? 320 : 880);
+    try {
+      if ('Notification' in window && Notification.permission === 'granted')
+        new Notification(title, { body: body.slice(0, 150), tag: title });
+    } catch (e) { }
+    this.updateBell();
+    this.saveAlerts();
+  },
+
+  updateBell() {
+    const b = document.getElementById('pro-bell-badge');
+    if (!b) return;
+    if (this.alerts.unread > 0) { b.style.display = 'flex'; b.textContent = this.alerts.unread > 99 ? '99' : this.alerts.unread; }
+    else b.style.display = 'none';
+  },
+
+  toast(kind, icon, title, body) {
+    const w = document.getElementById('toast-wrap');
+    if (!w) return;
+    const d = document.createElement('div');
+    d.className = 'toast ' + (kind || '');
+    d.innerHTML = `<span class="toast-i">${icon}</span><div class="toast-b"><div class="toast-t">${title}</div><div>${body}</div></div><span class="toast-x">✕</span>`;
+    d.querySelector('.toast-x').onclick = () => d.remove();
+    w.appendChild(d);
+    setTimeout(() => { d.style.transition = 'opacity .3s'; d.style.opacity = '0'; setTimeout(() => d.remove(), 300); }, 11000);
+    while (w.children.length > 4) w.firstChild.remove();
+  },
+
+  beep(f) {
+    try {
+      const c = this._ac || (this._ac = new (window.AudioContext || window.webkitAudioContext)());
+      if (c.state === 'suspended') c.resume();
+      const o = c.createOscillator(), g = c.createGain();
+      o.connect(g); g.connect(c.destination);
+      o.type = 'sine'; o.frequency.value = f || 800;
+      g.gain.setValueAtTime(0.0001, c.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.16, c.currentTime + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + 0.45);
+      o.start(); o.stop(c.currentTime + 0.5);
+    } catch (e) { }
+  },
+
+  toggleAlertPanel(force) {
+    const p = document.getElementById('alert-panel');
+    if (!p) return;
+    const show = force === undefined ? !p.classList.contains('show') : force;
+    p.classList.toggle('show', show);
+    if (show) { this.alerts.unread = 0; this.updateBell(); this.renderAlertPanel(); }
+  },
+
+  clearAlerts() { this.alerts.log = []; this.alerts.unread = 0; this.updateBell(); this.saveAlerts(); this.renderAlertPanel(); },
+
+  renderAlertPanel() {
+    const armedEl = document.getElementById('ap-armed');
+    if (armedEl) {
+      armedEl.innerHTML = this.alerts.armed.length
+        ? '🎯 <b style="color:#e6e9f0">مُسلَّح الآن:</b> ' + this.alerts.armed.map(a =>
+          `<span style="display:inline-block;margin:2px 3px;padding:2px 8px;border-radius:11px;background:rgba(14,207,126,.1);border:1px solid rgba(14,207,126,.25);color:#0ecf7e;font-family:'IBM Plex Mono',monospace">${a.sym} <span onclick="PRO.disarm('${a.sym}')" style="cursor:pointer;color:#7a8ba8">✕</span></span>`).join('')
+        : 'لا شيء مُسلَّح. افتح غرفة القرار واضغط «🔔 سلّح» على أي فرصة.';
+    }
+    const list = document.getElementById('ap-list');
+    if (!list) return;
+    list.innerHTML = this.alerts.log.length
+      ? this.alerts.log.map(l => `<div class="ap-item">
+          <div class="t" style="color:${l.kind === 'dn' ? '#f04458' : '#0ecf7e'}">${l.icon} ${l.title}</div>
+          <div style="color:#9aa4b8">${l.body}</div>
+          <div class="ap-time">${new Date(l.t).toLocaleString('en-GB')}</div></div>`).join('')
+      : '<div class="ap-empty">لا تنبيهات بعد.<br>سلّح فرصة من غرفة القرار ليبدأ المراقب.</div>';
+  },
+
+  /* ── مسح النوافذ الزمنية على القائمة القصيرة + المُسلَّح ──
+     يُشغَّل بعد كل مسح شامل. لا يمسح ٢٣٨ سهماً (التحليل الطيفي مكلف)،
+     بل العشرين المرشّحة وما سلّحه المستخدم — وهي وحدها ما يهمّه. */
+  timeRadarSweep() {
+    const syms = new Set([...(DD.results || []).map(r => r.sym), ...this.alerts.armed.map(a => a.sym)]);
+    const hits = [];
+    for (const sym of syms) {
+      if (G.demo.has(sym)) continue;
+      let tm = null;
+      try { tm = ddTiming(sym); } catch (e) { }
+      const imminent = tm && tm.ok && tm.significant && tm.nextValley && tm.nextValley.barsAhead <= 2;
+      const d = _advData.find(x => x.sym === sym);
+      const align = !!(d && d.tat && d.tat.active);
+      if (imminent || align) hits.push({ sym, bars: tm?.nextValley?.barsAhead ?? null, align, sd: tm?.nextValley?.sdBars ?? null });
+    }
+    if (!hits.length) return;
+    hits.sort((a, b) => (a.bars ?? 99) - (b.bars ?? 99));
+    this.fire('up', '⏱', `${hits.length} سهم في نافذة زمنية قريبة`,
+      hits.slice(0, 6).map(x => `<b>${x.sym}</b>${x.bars != null ? ` بعد ${x.bars}${x.sd != null ? '±' + x.sd : ''} جلسة` : ''}${x.align ? ' ⏱توافق' : ''}`).join(' · ') +
+      ' — النافذة ترجيح احتمالي لا موعد. لا تدخل بها وحدها؛ انتظر الزناد السعري المكتوب في بطاقة الفرصة.');
+  },
+
+  /* ══════════════════════════════════════════════════════════════
+     🗣 الترجمة إلى جملة تنفيذية واحدة
+     ══════════════════════════════════════════════════════════════ */
+  plainAction(r) {
+    const e = r.execPrice, s = r.tp.stop, t = r.finalTarget, q = r.qty;
+    switch (r.action) {
+      case 'buy':
+        return { head: '🟢 ادخل الآن', body: `اشترِ ${ddFmt(q)} سهم عند السعر الحالي ${r.price.toFixed(2)}$ مباشرة.` };
+      case 'buy_stop':
+        return { head: '🔵 لا تدخل الآن — ضع أمراً موقوفاً', body: `حط أمر شراء موقوف عند <b>${e}$</b>. إن وصله السهم تدخل تلقائياً، وإن لم يصله فلا صفقة اليوم. لا تشترِ تحته.` };
+      case 'buy_half':
+        return { head: '🟡 نصف مركز الآن', body: `اشترِ ${ddFmt(q)} سهم فقط (نصف الكمية) عند ${r.price.toFixed(2)}$، والنصف الثاني بعد إغلاق فوق <b>${e}$</b>.` };
+      case 'wait':
+        return { head: '🟠 انتظر السعر', body: `لا تشترِ الآن. انتظر رجوعه إلى <b>${e}$</b> ثم ادخل بـ ${ddFmt(q)} سهم.` };
+      default:
+        return { head: '⚪ مراقبة فقط', body: r.lite ? `لم يجتز شروط الدخول: ${r.blockedBy}` : 'لا شرط دخول متحقّق اليوم. الانتظار قرار صحيح.' };
+    }
+  },
+
+  exitRule(r) {
+    const s = r.tp.stop, t = r.finalTarget;
+    let extra = '';
+    const tm = r.timing;
+    if (tm && tm.ok && tm.significant && tm.cyclePos != null && tm.cyclePos <= 20 && !tm.risingPhase)
+      extra = ` ⏱ الدورة المقيسة (${tm.period} جلسة) قرب قمتها — إن ربحت بسرعة فخفّف مبكراً.`;
+    else if (tm && tm.nextValley)
+      extra = ` ⏱ النافذة الزمنية القادمة بعد ${tm.nextValley.barsAhead}±${tm.nextValley.sdBars} جلسة.`;
+    return `اخرج كاملاً إذا أغلق تحت <b>${s}$</b> — بلا مراجعة. بِع النصف عند <b>${t}$</b> وارفع الوقف إلى سعر دخولك.${extra}`;
+  },
+
+  tierOf(r) {
+    if (r.lite) return { k: 'B', txt: 'قريبة', col: '#f5c842' };
+    if (['buy', 'buy_stop'].includes(r.action)) return { k: 'A', txt: 'جاهزة', col: '#0ecf7e' };
+    if (r.action === 'buy_half') return { k: 'A', txt: 'نصف مركز', col: '#f5c842' };
+    return { k: 'C', txt: 'مراقبة', col: '#4a9eff' };
+  },
+
+  /* ══════════════════════════════════════════════════════════════
+     🎬 بطاقة التنفيذ — أعلى الجدول
+     ══════════════════════════════════════════════════════════════ */
+  renderActionCard() {
+    const w = document.getElementById('act-wrap');
+    if (!w) return;
+    const rows = (DD.results || []);
+    if (!rows.length || _filter !== 'decision') { w.classList.remove('show'); return; }
+    if (this.actIdx >= rows.length) this.actIdx = 0;
+    const r = rows[this.actIdx];
+    const pa = this.plainAction(r), tier = this.tierOf(r);
+    const armed = this.isArmed(r.sym);
+    w.classList.add('show');
+    w.innerHTML = `
+      <div class="act-head">
+        <span class="act-sym">${r.sym}</span>
+        <span class="act-name">${r.name}</span>
+        <span style="font-size:10px;padding:2px 8px;border-radius:10px;color:${tier.col};border:1px solid ${tier.col}55;background:${tier.col}12;font-weight:700">${tier.txt}</span>
+        <span style="font-size:10px;color:var(--t3);font-family:'IBM Plex Mono',monospace">${this.actIdx + 1}/${rows.length}</span>
+      </div>
+      <div class="act-verdict" style="color:${r.color};margin-bottom:7px">${pa.head}</div>
+      <div class="act-grid">
+        <div class="act-box"><div class="act-box-l">السعر الآن</div><div class="act-box-v">${r.price.toFixed(2)}</div></div>
+        <div class="act-box"><div class="act-box-l">ادخل عند</div><div class="act-box-v" style="color:#FFD700">${r.execPrice}</div></div>
+        <div class="act-box"><div class="act-box-l">الوقف</div><div class="act-box-v" style="color:#f04458">${r.tp.stop}</div></div>
+        <div class="act-box"><div class="act-box-l">الهدف</div><div class="act-box-v" style="color:#0ecf7e">${r.finalTarget}</div></div>
+      </div>
+      <div class="act-line">🎯 <b>ماذا أفعل الآن؟</b> ${pa.body}</div>
+      <div class="act-exit">🛑 <b>متى أخرج؟</b> ${this.exitRule(r)}</div>
+      <div class="act-btns">
+        <button class="act-btn act-btn-go" onclick="selectStock('${r.sym}');${this.mobile ? "PRO.setView('chart');" : ''}">📈 افتح الشارت</button>
+        <button class="act-btn act-btn-al" onclick="PRO.${armed ? `disarm('${r.sym}');PRO.renderActionCard()` : `arm('${r.sym}');PRO.renderActionCard()`}">${armed ? '🔕 ألغِ التسليح' : '🔔 سلّح التنبيه'}</button>
+        <button class="act-btn act-btn-nx" onclick="PRO.actIdx=(PRO.actIdx+1)%${rows.length};PRO.renderActionCard()">التالية ›</button>
+        <button class="act-btn act-btn-nx" onclick="ddReport2('${r.sym}')">📄 التفاصيل</button>
+      </div>`;
+  }
+};
+window.PRO = PRO;
+
+/* ══════════════════════════════════════════════════════════════════════
+   🧭 غرفة القرار — نسخة ٣: عشرون فرصة دائماً، مرتّبة، بلا صفحة فارغة
+   ──────────────────────────────────────────────────────────────────────
+   المشكلة في النسخة ٢: البوابات صارمة، فتخرج القائمة فارغة كثيراً
+   ويبقى المستخدم بلا شيء. الحل ليس تخفيف البوابات (ذلك يفسد الحكم)،
+   بل الفصل بين طبقتين:
+     • الفئة (أ) — اجتازت كل البوابات: قابلة للتنفيذ.
+     • الفئة (ب) — لم تجتز، لكنها الأقرب: للمراقبة، مع ذكر ما منعها.
+   تُعرض العشرون دائماً، وكل صف يقول صراحة إلى أي فئة ينتمي.
+   ══════════════════════════════════════════════════════════════════════ */
+
+function ddLiteRow(d, rej) {
+  const sym = d.sym;
+  if (G.demo.has(sym)) return null;
+  const cs = G.cans[sym];
+  if (!cs || cs.length < 60) return null;
+  let tp = null;
+  try { tp = calcTradePlan(sym); } catch (e) { }
+  if (!tp) return null;
+
+  let launch = null, fr = null, tm = null, ev = { A: [], B: [], C: [] };
+  try { launch = ddLaunch(sym, d); } catch (e) { }
+  try { fr = launch?.frac || ddFrac(sym); } catch (e) { }
+  try { tm = launch?.timing || ddTiming(sym); } catch (e) { }
+  try { ev = ddEvidence(d); } catch (e) { }
+
+  const ind = G.ind[sym] || {};
+  const atr = ind.atr > 0 ? ind.atr : d.price * 0.015;
+  let fracTarget = null, fracSrc = null, fracUp = null;
+  if (fr && fr.ok && fr.target && fr.target > tp.entry * 1.005) {
+    fracTarget = fr.target; fracSrc = fr.targetSource;
+    fracUp = +((fracTarget - tp.entry) / tp.entry * 100).toFixed(2);
+  }
+  const risk = tp.entry - tp.stop;
+  if (!(risk > 0)) return null;
+  const finalTarget = fracTarget ?? tp.targets[0].price;
+  const rr = +((finalTarget - tp.entry) / risk).toFixed(2);
+  const qty = Math.max(0, Math.floor((DD.cfg.capital * DD.cfg.riskPct / 100) / risk));
+  const score = launch?.score ?? 0;
+  const rank = score * 10 + (d.masterScore || 0) / 2 + ev.A.length * 12 - ev.C.length * 18;
+
+  return {
+    sym, name: d.name, price: d.price, pct: d.pct, sec: d.sec, mode: DD.mode,
+    lite: true, action: 'watch', label: '◎ تحت التكوين', color: '#7a8ba8',
+    gates: rej?.gates || [], ev, tp, verdict: null,
+    size: { qty, caps: [], binding: { n: qty }, riskPerShare: risk, heatPctUsed: 0 },
+    liq: null, atr, rr, rrSrc: fracTarget ? 'هدف فراكتالي' : 'هدف هيكلي',
+    stopATR: +(risk / atr).toFixed(2),
+    launch, timing: tm, frac: fr, fracTarget, fracSrc, fracUp,
+    finalTarget, qty, execPrice: tp.entry,
+    blockedBy: rej?.why || 'لم يجتز إحدى بوابات التنفيذ',
+    trigger: `للمراقبة فقط — ${rej?.why || 'لم يجتز بوابات التنفيذ'}`,
+    sessionsToT: atr > 0 ? Math.ceil((finalTarget - tp.entry) / atr) : null,
+    masterScore: d.masterScore, rank
+  };
+}
+
+function ddRunPro() {
+  if (!_advData.length) {
+    PRO.toast('dn', '⚠️', 'لا بيانات مسح', 'شغّل «🔬 مسح شامل» أولاً — غرفة القرار تبني قرارها على نتائج المسح.');
+    return;
+  }
+  DD.cfg.capital = +(document.getElementById('dd-cap')?.value || DD.cfg.capital) || 100000;
+  DD.cfg.riskPct = +(document.getElementById('dd-risk')?.value || DD.cfg.riskPct) || 1;
+  DD.save();
+
+  DD.regime = ddRegime();
+  const mode = DD.mode || 'launch';
+  const passed = [], near = [];
+
+  for (const d of _advData) {
+    let r = null;
+    try { r = ddDecide2(d, DD.regime, mode); } catch (e) { continue; }
+    if (r && r.action !== 'reject') { passed.push(r); continue; }
+    try { const l = ddLiteRow(d, r); if (l) near.push(l); } catch (e) { }
+  }
+
+  passed.sort((a, b) => b.rank - a.rank);
+  near.sort((a, b) => b.rank - a.rank);
+
+  const out = passed.slice(0, PRO.TOP_N);
+  if (out.length < PRO.TOP_N) out.push(...near.slice(0, PRO.TOP_N - out.length));
+
+  DD.results = out;
+  DD.passedCount = passed.length;
+  DD.nearCount = near.length;
+  DD.ran = true;
+  PRO.actIdx = 0;
+
+  const fb = document.getElementById('fb-decision');
+  if (fb) fb.textContent = out.length;
+  const cnt = document.getElementById('dd-count');
+  if (cnt) {
+    const ready = passed.filter(r => (r.launch?.score ?? 0) >= 72).length;
+    cnt.innerHTML = `🎯 <b style="color:#FFD700">${out.length}</b> فرصة · ` +
+      `<b style="color:#0ecf7e">${passed.length}</b> اجتازت كل البوابات · ` +
+      `<b style="color:#f5c842">${Math.max(0, out.length - passed.length)}</b> قريبة · ` +
+      `<b style="color:#0ecf7e">${ready}</b> جاهزة فعلاً`;
+  }
+  try { ddUpdateBar(); } catch (e) { }
+  if (_filter === 'decision') renderResults();
+  try { PRO.timeRadarSweep(); } catch (e) { }
+}
+ddRun2 = ddRunPro;
+window.ddRun2 = ddRunPro;
+window.ddRun = ddRunPro;
+
+/* ══════════════════════════════════════════════════════════════════════
+   🃏 عرض غرفة القرار — بطاقات «ادخل هنا» أو جدول كامل
+   ══════════════════════════════════════════════════════════════════════ */
+function ddRenderPro() {
+  const head = document.getElementById('rthead');
+  const body = document.getElementById('rtbody');
+  if (!body) return;
+
+  if (!DD.ran) {
+    if (head) head.innerHTML = '';
+    body.innerHTML = `<tr><td colspan="20" style="padding:26px;text-align:center;color:var(--t3);line-height:2.1">
+      <div style="font-size:34px;margin-bottom:8px">🧭</div>
+      <b style="color:#e6e9f0;font-size:14px">لحظة — المسح التلقائي يعمل عند فتح المنصة</b><br>
+      إن لم تظهر الفرص: ① «🔬 مسح شامل» &nbsp;·&nbsp; ② «🧭 احسب القرارات»<br>
+      <span style="font-size:11px">ستظهر لك ٢٠ فرصة مرتّبة، كل واحدة تقول: ادخل عند كم، اخرج عند كم.</span>
+    </td></tr>`;
+    _visibleSyms = []; PRO.renderActionCard(); return;
+  }
+
+  const rows = [...(DD.results || [])];
+  if (!rows.length) {
+    if (head) head.innerHTML = '';
+    body.innerHTML = `<tr><td colspan="20" style="padding:26px;text-align:center;color:var(--t3);line-height:2">
+      لا سهم اجتاز الحد الأدنى للبيانات أو السيولة في هذا الوضع.<br>
+      <span style="font-size:11px;color:#9aa4b8">جرّب الوضع الآخر (جاهزة للانطلاق / جاهزة للتنفيذ) أو أعد المسح الشامل.</span>
+    </td></tr>`;
+    _visibleSyms = []; PRO.renderActionCard(); return;
+  }
+  _visibleSyms = rows.map(r => r.sym);
+  if (_focusedIdx >= _visibleSyms.length) _focusedIdx = _visibleSyms.length - 1;
+
+  PRO.renderActionCard();
+
+  /* ── وضع البطاقات: سطر تنفيذي لكل فرصة ── */
+  if (PRO.cards || PRO.mobile) {
+    if (head) head.innerHTML = '';
+    document.getElementById('rtbl')?.classList.add('cards-mode');
+    const cards = rows.map((r, idx) => {
+      const pa = PRO.plainAction(r), tier = PRO.tierOf(r);
+      const armed = PRO.isArmed(r.sym);
+      const up = r.fracUp != null ? `+${r.fracUp}%` : '';
+      const ready = r.launch ? `جاهزية ${r.launch.score}/100` : '';
+      const t = r.timing;
+      const win = (t && t.ok && t.significant && t.nextValley)
+        ? `⏱ نافذة بعد ${t.nextValley.barsAhead}±${t.nextValley.sdBars} جلسة` : '';
+      return `<div class="opp tier-${tier.k.toLowerCase()}" onclick="selectStock('${r.sym}');setFocusedRow(${idx})">
+        <div class="opp-top">
+          <span class="opp-rank">${idx + 1}</span>
+          <span class="opp-sym">${r.sym}</span>
+          <span class="opp-nm">${r.name}</span>
+          <span class="opp-pct" style="color:${r.pct >= 0 ? 'var(--up)' : 'var(--dn)'}">${r.pct >= 0 ? '+' : ''}${r.pct.toFixed(2)}%</span>
+        </div>
+        <div class="opp-verdict" style="color:${r.color}">
+          <span>${pa.head}</span>
+          <span class="opp-ready">${ready}</span>
+        </div>
+        <div class="opp-lv">
+          <div class="opp-lv-i"><div class="opp-lv-l">السعر</div><div class="opp-lv-v">${r.price.toFixed(2)}</div></div>
+          <div class="opp-lv-i"><div class="opp-lv-l">ادخل</div><div class="opp-lv-v" style="color:#FFD700">${r.execPrice}</div></div>
+          <div class="opp-lv-i"><div class="opp-lv-l">الوقف</div><div class="opp-lv-v" style="color:#f04458">${r.tp.stop}</div></div>
+          <div class="opp-lv-i"><div class="opp-lv-l">الهدف ${up}</div><div class="opp-lv-v" style="color:#0ecf7e">${r.finalTarget}</div></div>
+        </div>
+        <div class="opp-why">${pa.body}
+          <div style="margin-top:3px;color:var(--t3)">العائد/المخاطرة 1:${r.rr} · الكمية ${ddFmt(r.qty)} سهم · ${r.ev.A.length}أ·${r.ev.B.length}ب${r.ev.C.length ? '·' + r.ev.C.length + 'ج' : ''} ${win}</div>
+          ${r.lite ? `<div style="margin-top:3px;color:#f5c842">⚠️ فئة (ب): ${r.blockedBy}</div>` : ''}
+        </div>
+        <div class="opp-act">
+          <button class="opp-b1" onclick="event.stopPropagation();selectStock('${r.sym}');${PRO.mobile ? "PRO.setView('chart')" : ''}">📈 الشارت</button>
+          <button class="opp-b2" onclick="event.stopPropagation();PRO.${armed ? `disarm('${r.sym}')` : `arm('${r.sym}')`};renderResults()">${armed ? '🔕 مُسلَّح' : '🔔 سلّح'}</button>
+          <button class="opp-b3" onclick="event.stopPropagation();ddReport2('${r.sym}')">📄 التفاصيل</button>
+        </div>
+      </div>`;
+    }).join('');
+    body.innerHTML = `<tr><td colspan="20" style="padding:0;border:none"><div class="opp-list">
+      <div style="padding:5px 4px 8px;font-size:11px;color:var(--t3);line-height:1.8">
+        <b style="color:#0ecf7e">الفئة أ</b> اجتازت كل بوابات التنفيذ ·
+        <b style="color:#f5c842">الفئة ب</b> قريبة ولم تجتز بعد (مراقبة) ·
+        <b style="color:#4a9eff">الفئة ج</b> اجتازت لكن بلا زناد اليوم.
+      </div>${cards}</div></td></tr>`;
+    return;
+  }
+
+  /* ── وضع الجدول الكامل ── */
+  document.getElementById('rtbl')?.classList.remove('cards-mode');
+  if (head) head.innerHTML = `<tr>
+    <th>#</th><th onclick="sortResults('sym')">الرمز</th><th>الاسم</th><th>الفئة</th>
+    <th onclick="sortResults('price')">السعر</th><th>القرار</th><th>🚀 الجاهزية</th>
+    <th>ادخل عند</th><th>الوقف</th><th>الهدف</th><th>R:R</th><th>الكمية</th>
+    <th>⏱ النافذة</th><th>الأدلة</th><th>تنبيه</th><th>تفاصيل</th></tr>`;
+
+  const bar = (v, col) => `<div style="display:flex;align-items:center;gap:4px">
+      <div style="width:34px;height:5px;background:rgba(255,255,255,.08);border-radius:3px;overflow:hidden">
+        <div style="width:${Math.max(0, Math.min(100, v))}%;height:100%;background:${col}"></div></div>
+      <span style="font-family:monospace;color:${col};font-weight:700">${v}</span></div>`;
+
+  body.innerHTML = rows.map((r, idx) => {
+    const tier = PRO.tierOf(r), t = r.timing;
+    const timeCell = !t || !t.ok ? '<span style="color:var(--t3)">—</span>'
+      : !t.significant ? '<span style="color:var(--t3)">لا دورة</span>'
+        : (t.nextValley ? `<span style="color:${t.coherent ? '#0ecf7e' : '#f5c842'}">قاع ${t.nextValley.barsAhead}±${t.nextValley.sdBars}ج</span>`
+          : `<span style="color:var(--t2)">${t.period}ج</span>`);
+    const armed = PRO.isArmed(r.sym);
+    return `<tr data-idx="${idx}" class="${_focusedIdx === idx ? 'kb-focus' : ''}" onclick="selectStock('${r.sym}');setFocusedRow(${idx})" style="cursor:pointer;border-right:3px solid ${r.color}">
+      <td style="font-family:monospace;color:var(--t3)">${idx + 1}</td>
+      <td style="font-weight:700;color:var(--bl);font-family:'IBM Plex Mono',monospace">${r.sym}</td>
+      <td style="max-width:84px;overflow:hidden;text-overflow:ellipsis">${r.name}</td>
+      <td><span style="font-size:calc(var(--base-font)*0.72);padding:1px 6px;border-radius:9px;color:${tier.col};border:1px solid ${tier.col}55">${tier.txt}</span></td>
+      <td style="font-family:monospace">${r.price.toFixed(2)}</td>
+      <td><span style="color:${r.color};font-weight:700;white-space:nowrap">${r.label}</span></td>
+      <td>${r.launch ? bar(r.launch.score, r.launch.color) : '—'}</td>
+      <td style="font-family:monospace;color:#FFD700;font-weight:700">${r.execPrice}</td>
+      <td style="font-family:monospace;color:var(--dn)">${r.tp.stop}</td>
+      <td style="font-family:monospace;color:var(--up);font-weight:700">${r.finalTarget}${r.fracUp != null ? `<span style="color:var(--t3);font-weight:400"> +${r.fracUp}%</span>` : ''}</td>
+      <td style="font-family:monospace;font-weight:700">1:${r.rr}</td>
+      <td style="font-family:monospace">${ddFmt(r.qty)}</td>
+      <td style="font-size:calc(var(--base-font)*0.78)">${timeCell}</td>
+      <td style="white-space:nowrap"><span style="color:#0ecf7e;font-weight:700">${r.ev.A.length}أ</span>·<span style="color:#4a9eff">${r.ev.B.length}ب</span>${r.ev.C.length ? `·<span style="color:#f04458">${r.ev.C.length}ج</span>` : ''}</td>
+      <td><button onclick="event.stopPropagation();PRO.${armed ? `disarm('${r.sym}')` : `arm('${r.sym}')`};renderResults()" style="background:${armed ? 'rgba(14,207,126,.16)' : 'rgba(255,215,0,.1)'};border:1px solid ${armed ? 'rgba(14,207,126,.4)' : 'rgba(255,215,0,.25)'};color:${armed ? '#0ecf7e' : '#FFD700'};padding:2px 8px;border-radius:3px;cursor:pointer;font-size:calc(var(--base-font)*0.75);font-family:inherit">${armed ? '🔔 مُسلَّح' : '🔔 سلّح'}</button></td>
+      <td><button onclick="event.stopPropagation();ddReport2('${r.sym}')" style="background:rgba(255,215,0,.1);border:1px solid rgba(255,215,0,.25);color:#FFD700;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:calc(var(--base-font)*0.75);font-family:inherit">📄</button></td>
+    </tr>`;
+  }).join('');
+}
+ddRenderTable2 = ddRenderPro;
+window.ddRenderTable2 = ddRenderPro;
+
+/* ══ تقرير مبسّط للفئة (ب) — النسخة الأصلية تفترض حقول التنفيذ الكاملة ══ */
+const _ddReportFull = ddReport2;
+function ddReportPro(sym) {
+  const r = (DD.results || []).find(x => x.sym === sym);
+  if (!r) { PRO.toast('dn', '⚠️', 'لا قرار محسوب', 'اضغط «🧭 احسب القرارات» أولاً.'); return; }
+  if (!r.lite) { try { return _ddReportFull(sym); } catch (e) { PRO.warn('report', e); } }
+
+  const pa = PRO.plainAction(r);
+  const parts = (r.launch?.parts || []).map(p =>
+    `<div style="margin-bottom:7px"><b style="color:#FFD700">${p.n}</b> — ${p.v}/${p.max}
+     <div style="font-size:12px;color:#9aa4b8;margin-top:2px">${p.x}</div></div>`).join('') || '<div style="color:#3d4a5e">تعذّر حساب الجاهزية</div>';
+  const S = 'background:#151b2b;border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:14px 16px;margin-bottom:14px;';
+  openTimeReport(`◎ مراقبة — ${r.sym} ${r.name}`, `
+    <div style="${S}border-color:rgba(245,200,66,.3);background:rgba(245,200,66,.05)">
+      <div style="font-size:17px;font-weight:800;color:#f5c842;margin-bottom:8px">الفئة (ب) — قريبة، ولم تجتز بعد</div>
+      <div style="font-size:13px;line-height:2">
+        <b>ما الذي منعها:</b> ${r.blockedBy}<br>
+        السعر ${r.price.toFixed(2)}$ · لو تحقّق الشرط فالدخول عند <b style="color:#FFD700">${r.execPrice}</b>
+        · الوقف <b style="color:#f04458">${r.tp.stop}</b> · الهدف <b style="color:#0ecf7e">${r.finalTarget}</b> · العائد 1:${r.rr}
+      </div>
+      <div style="margin-top:10px;padding:9px 11px;background:rgba(255,215,0,.06);border:1px solid rgba(255,215,0,.2);border-radius:6px">
+        <b>ماذا أفعل الآن؟</b> ${pa.body}
+      </div>
+    </div>
+    <div style="${S}"><div style="color:#FFD700;font-weight:800;font-size:13.5px;margin-bottom:10px">🚀 من أين جاءت درجة الجاهزية (${r.launch?.score ?? '—'}/100)</div>${parts}</div>
+    <div style="${S}border-color:rgba(240,68,88,.25);background:rgba(240,68,88,.04);margin-bottom:0">
+      <div style="color:#f04458;font-weight:800;font-size:13px;margin-bottom:8px">⚠️ حدود هذا العرض</div>
+      <div style="margin-bottom:6px">• هذه ليست توصية شراء. هي ترتيب لأقرب المرشّحين حين لا يجتاز أحد كل البوابات.</div>
+      <div style="margin-bottom:6px">• «قريبة» تعني أن شرطاً واحداً على الأقل غير متحقّق — والدخول قبل تحقّقه دخولٌ بلا سبب.</div>
+      <div>• لا شيء هنا يعرف اتجاه السهم غداً. الجاهزية تقيس الانضغاط، والانضغاط يسبق التوسّع بلا تحديد اتجاهه.</div>
+    </div>`);
+}
+ddReport2 = ddReportPro;
+window.ddReport2 = ddReportPro;
+window.ddReport = ddReportPro;
+
+/* ══════════════════════════════════════════════════════════════════════
+   🚀 إقلاع محصّن — السبب الحقيقي لعدم فتح المنصة على الجوال
+   ──────────────────────────────────────────────────────────────────────
+   النسخة السابقة كانت تنتظر حدث window 'load'، وهو لا يقع إلا بعد اكتمال
+   *كل* المصادر الخارجية (خط جوجل + مكتبة الشارت من CDN). على شبكة جوال
+   بطيئة أو خلف حجب، يبقى الحدث معلّقاً إلى الأبد ⟵ init لا يُستدعى ⟵
+   الجدول لا يُبنى ⟵ شاشة سوداء بلا قائمة. وهذا بالضبط ما وصفه المستخدم.
+
+   الحل ثلاث طبقات:
+     ١) الإقلاع على DOMContentLoaded (لا ينتظر الصور والخطوط والـCDN).
+     ٢) مهلة قصوى ٥ ثوانٍ لمكتبة الشارت — بعدها نُقلع بلا شارت، والقائمة
+        تظهر. الشارت يُركَّب لاحقاً إن وصل.
+     ٣) كل خطوة داخل init معزولة بـ try/catch: فشل الشارت لا يُسقط الجدول.
+   ══════════════════════════════════════════════════════════════════════ */
+
+init = function () {
+  const step = (name, fn) => { try { fn(); } catch (e) { console.error('[init:' + name + ']', e); } };
+
+  step('demo', () => STKS.forEach(s => initDemo(s.sym)));
+  step('chart', () => initChart());
+  step('header', () => updateHeader('SPY'));
+  step('chartData', () => updateChart('SPY'));
+  step('plan', () => updateTradePlan('SPY'));
+  step('table', () => renderResults());
+  step('clock', () => setInterval(() => { const c = document.getElementById('clk'); if (c) c.textContent = Tm(); }, 1000));
+  step('pro', () => PRO.init());
+
+  /* تحميل مرحلي — الأولوية أولاً حتى تظهر أسعار حقيقية بسرعة */
+  setTimeout(async () => {
+    try {
+      await Promise.allSettled(PRI.slice(0, 8).map(s => loadStock(s)));
+      PRI.forEach(sym => { try { calcInd(sym); } catch (e) { } });
+      updateHeader(G.sel); updateChart(G.sel); updateTradePlan(G.sel); renderResults();
+    } catch (e) { console.error('[init:priority]', e); }
+  }, 300);
+
+  setTimeout(async () => {
+    try {
+      await Promise.allSettled(PRI.slice(8).map(s => loadStock(s)));
+      PRI.forEach(sym => { try { calcInd(sym); } catch (e) { } });
+      renderResults();
+    } catch (e) { }
+  }, 2000);
+
+  /* ── مسح تلقائي عند الفتح ──
+     المستخدم لا يجب أن يضغط زرّين قبل أن يرى فرصة واحدة. runFullScan
+     يجلب كل الأسهم أصلاً، فلا داعي لمرحلة تحميل ثالثة منفصلة تكرّر العمل. */
+  setTimeout(async () => {
+    try {
+      await runFullScan();
+      try { ddRunPro(); } catch (e) { console.error('[autoDecide]', e); }
+      const n = (DD.results || []).length;
+      const real = STKS.length - G.demo.size;
+      if (real > 20 && n) {
+        PRO.toast('up', '✅', 'المسح اكتمل',
+          `${real} سهم ببيانات حقيقية · <b>${n}</b> فرصة مرتّبة في غرفة القرار. اضغط 🧭 لعرضها.`);
+      }
+    } catch (e) { console.error('[autoScan]', e); }
+  }, 4000);
+};
+window.init = init;
+
+function attachChartLater() {
+  /* الشارت وصل بعد الإقلاع — نركّبه بلا إعادة تحميل الصفحة. */
+  if (G.lwChart || typeof LightweightCharts === 'undefined') return;
+  try {
+    initChart();
+    if (G.lwChart) { updateChart(G.sel); updateHeader(G.sel); }
+  } catch (e) { console.error('[attachChartLater]', e); }
+}
+window.attachChartLater = attachChartLater;
+
+(function bootPro() {
+  let booted = false;
+  const go = () => {
+    if (booted) return; booted = true;
+    try { init(); }
+    catch (e) {
+      const b = document.getElementById('boot-err');
+      if (b) {
+        b.classList.add('show');
+        document.getElementById('boot-err-msg').textContent =
+          'حدث خطأ أثناء تشغيل المنصة. إن تكرّر بعد إعادة المحاولة، أرسل النص التقني بالأسفل.';
+        document.getElementById('boot-err-detail').textContent = (e && (e.stack || e.message)) || String(e);
+      }
+    }
+  };
+
+  const waitChart = () => {
+    if (typeof LightweightCharts !== 'undefined') { go(); return; }
+    const CDNs = [
+      'https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js',
+      'https://cdnjs.cloudflare.com/ajax/libs/lightweight-charts/4.1.0/lightweight-charts.standalone.production.js'
+    ];
+    let i = 0;
+    const tryNext = () => {
+      if (typeof LightweightCharts !== 'undefined') { go(); attachChartLater(); return; }
+      if (i >= CDNs.length) { go(); return; }
+      const s = document.createElement('script');
+      s.src = CDNs[i++]; s.async = true;
+      s.onload = () => { if (typeof LightweightCharts !== 'undefined') { go(); attachChartLater(); } else tryNext(); };
+      s.onerror = tryNext;
+      document.head.appendChild(s);
+    };
+    tryNext();
+    /* ⏱ الحد الأقصى للانتظار: ٣.٥ ثانية. بعدها تُقلع المنصة بلا شارت
+       والقائمة تظهر فوراً — أفضل ألف مرة من شاشة سوداء. إن وصلت المكتبة
+       متأخّرة يُركَّب الشارت لاحقاً بلا إعادة تحميل. */
+    setTimeout(() => { if (!booted) go(); }, 3500);
+    let tries = 0;
+    const late = setInterval(() => {
+      if (++tries > 20) { clearInterval(late); return; }
+      if (typeof LightweightCharts !== 'undefined') { clearInterval(late); attachChartLater(); }
+    }, 1500);
+  };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', waitChart);
+  else waitChart();
+})();
+
+/* لو انفلت خطأ غير متوقّع، لا نترك المستخدم أمام شاشة صامتة */
+window.addEventListener('error', e => {
+  /* أخطاء تحميل الموارد (صورة/سكربت خارجي) تصل هنا أيضاً بلا e.error.
+     تلك ليست أعطالاً تُوقف المنصة، ولا يجوز أن تُظهر شاشة الخطأ. */
+  if (e.target && e.target !== window) return;
+  if (!e.error) return;
+  console.error('[global]', e.error);
+  if (!document.getElementById('rtbody')?.innerHTML) {
+    const b = document.getElementById('boot-err');
+    if (b && !b.classList.contains('show')) {
+      b.classList.add('show');
+      document.getElementById('boot-err-msg').textContent = 'توقّف التشغيل بسبب خطأ برمجي.';
+      document.getElementById('boot-err-detail').textContent = (e.error && e.error.stack) || e.message || '';
+    }
+  }
+});
+
+/* ══ ربط بطاقة التنفيذ بأي إعادة رسم ══ */
+const _renderResultsOriginal = renderResults;
+renderResults = function () {
+  try {
+    if (_filter !== 'decision') document.getElementById('rtbl')?.classList.remove('cards-mode');
+    _renderResultsOriginal();
+  } catch (e) { console.error('[renderResults]', e); }
+  try {
+    const w = document.getElementById('act-wrap');
+    if (w && _filter !== 'decision') w.classList.remove('show');
+  } catch (e) { }
+};
+window.renderResults = renderResults;
+
+/* ══ إغلاق لوحة التنبيهات عند النقر خارجها ══ */
+document.addEventListener('click', e => {
+  const p = document.getElementById('alert-panel');
+  if (!p || !p.classList.contains('show')) return;
+  if (p.contains(e.target)) return;
+  const t = e.target;
+  if (!t || typeof t.closest !== 'function') return;
+  if (t.closest('#pro-bell') || t.closest('[data-v="alerts"]')) return;
+  p.classList.remove('show');
+});
 
 </script>
 
