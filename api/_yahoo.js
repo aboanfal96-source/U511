@@ -1,87 +1,106 @@
 /* ══════════════════════════════════════════════════════════════════════
-   وسيط ياهو المشترك — إدارة الكوكي والـ crumb
-   ──────────────────────────────────────────────────────────────────────
-   ياهو تطلب منذ 2023 زوجاً من (كوكي A1 + crumb) على معظم نقاط v7/v10.
-   نقطة الشارت v8 ما زالت تعمل بلا ذلك غالباً، لكن سلسلة العقود لا.
+   وحدة مشتركة لجلب بيانات ياهو من جهة الخادم.
 
-   نحتفظ بالزوج في ذاكرة العملية ونجدّده عند انتهائه (401/403/Invalid
-   Crumb). الاحتفاظ مهم: طلب crumb جديد مع كل استدعاء يستدعي خنق الطلبات
-   بعد دقائق من الاستخدام العادي.
+   لماذا من الخادم أصلاً؟ لأن المتصفح يمنع الطلب المباشر (CORS). البديل
+   الشائع هو وسيط عام مثل allorigins، وهو خيار سيّئ لثلاثة أسباب: طرف ثالث
+   يرى كل طلباتك، بلا ضمان توفّر، ويُحظر بـ429 عند أول مسح جماعي. على
+   Vercel الطلب يخرج من الخادم فلا قيد CORS من الأصل.
+
+   الـcrumb: بعض نقاط ياهو صارت تتطلّب كوكي + رمز crumb. نحصل عليه مرة
+   ونخزّنه في ذاكرة الدالة (تبقى حيّة بين الطلبات المتقاربة على Vercel)،
+   ونعيد المحاولة بلا crumb إن فشل — لأن نقاط أخرى ما زالت تعمل بدونه.
    ══════════════════════════════════════════════════════════════════════ */
 
-const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36';
 
-let CACHE = { cookie: null, crumb: null, at: 0 };
-const TTL = 45 * 60 * 1000;   /* الزوج يعيش نحو ساعة عند ياهو */
+let _crumb = null;
+let _cookie = null;
+let _crumbAt = 0;
+const CRUMB_TTL = 30 * 60 * 1000; /* نصف ساعة */
 
-async function getCrumb(force = false) {
-  if (!force && CACHE.crumb && Date.now() - CACHE.at < TTL) return CACHE;
-
-  const r1 = await fetch('https://fc.yahoo.com', {
-    headers: { 'User-Agent': UA },
-    redirect: 'manual'
-  }).catch(() => null);
-
-  let cookie = null;
-  if (r1) {
-    const raw = r1.headers.getSetCookie ? r1.headers.getSetCookie() : [r1.headers.get('set-cookie')].filter(Boolean);
-    cookie = raw.map(c => c.split(';')[0]).join('; ');
+async function getCrumb() {
+  if (_crumb && _cookie && Date.now() - _crumbAt < CRUMB_TTL) {
+    return { crumb: _crumb, cookie: _cookie };
   }
-  if (!cookie) {
-    const r2 = await fetch('https://finance.yahoo.com/', { headers: { 'User-Agent': UA } }).catch(() => null);
-    if (r2) {
-      const raw = r2.headers.getSetCookie ? r2.headers.getSetCookie() : [r2.headers.get('set-cookie')].filter(Boolean);
-      cookie = raw.map(c => c.split(';')[0]).join('; ');
-    }
-  }
+  try {
+    /* ① كوكي الموافقة */
+    const r1 = await fetch('https://fc.yahoo.com', {
+      headers: { 'User-Agent': UA },
+      redirect: 'manual'
+    });
+    const setCookie = r1.headers.get('set-cookie') || '';
+    const cookie = setCookie.split(',').map(s => s.split(';')[0].trim()).filter(Boolean).join('; ');
+    if (!cookie) return { crumb: null, cookie: null };
 
-  let crumb = null;
-  if (cookie) {
-    const r3 = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', {
+    /* ② رمز crumb مقابل الكوكي */
+    const r2 = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
       headers: { 'User-Agent': UA, Cookie: cookie }
-    }).catch(() => null);
-    if (r3 && r3.ok) {
-      const t = (await r3.text()).trim();
-      if (t && t.length < 40 && !t.startsWith('<')) crumb = t;
+    });
+    const crumb = (await r2.text()).trim();
+    if (!crumb || crumb.length > 40 || crumb.includes('<')) return { crumb: null, cookie };
+
+    _crumb = crumb; _cookie = cookie; _crumbAt = Date.now();
+    return { crumb, cookie };
+  } catch {
+    return { crumb: null, cookie: null };
+  }
+}
+
+/**
+ * يجلب مساراً من ياهو مع محاولات متدرّجة.
+ * @param {string} path مثل `/v8/finance/chart/AAPL`
+ * @param {object} params معاملات الاستعلام
+ * @returns {Promise<object>} الجسم المُحلَّل JSON
+ */
+export async function yahooFetch(path, params = {}) {
+  const qs = new URLSearchParams(params);
+  const hosts = ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com'];
+
+  let lastErr = 'لم تُنفَّذ أي محاولة';
+
+  /* محاولة أولى بلا crumb — أسرع، وتكفي لأغلب النقاط */
+  for (const host of hosts) {
+    try {
+      const rsp = await fetch(`${host}${path}?${qs}`, {
+        headers: { 'User-Agent': UA, Accept: 'application/json' },
+        signal: AbortSignal.timeout(10000)
+      });
+      if (rsp.ok) return await rsp.json();
+      /* 401/403 غالباً تعني أن النقطة تطلب crumb — نكسر الحلقة ونجرّبه */
+      if (rsp.status === 401 || rsp.status === 403) { lastErr = `ياهو أعاد ${rsp.status}`; break; }
+      lastErr = `ياهو أعاد ${rsp.status}`;
+    } catch (e) {
+      lastErr = e.name === 'TimeoutError' ? 'انتهت مهلة الطلب إلى ياهو' : (e.message || 'تعذّر الاتصال بياهو');
     }
   }
 
-  CACHE = { cookie, crumb, at: Date.now() };
-  return CACHE;
-}
-
-/** يجلب من ياهو مع الكوكي/الـcrumb، ويعيد المحاولة مرة واحدة بزوج جديد. */
-async function yfetch(buildUrl, { needCrumb = false } = {}) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const { cookie, crumb } = needCrumb ? await getCrumb(attempt > 0) : { cookie: null, crumb: null };
-    const url = buildUrl(crumb);
-    const headers = { 'User-Agent': UA, Accept: 'application/json' };
-    if (cookie) headers.Cookie = cookie;
-
-    const r = await fetch(url, { headers });
-    const text = await r.text();
-
-    if (r.ok) {
-      try { return { ok: true, status: 200, data: JSON.parse(text) }; }
-      catch { return { ok: false, status: 502, error: 'استجابة غير قابلة للتحليل من المزوّد' }; }
+  /* محاولة ثانية بالكوكي والـcrumb */
+  const { crumb, cookie } = await getCrumb();
+  if (crumb && cookie) {
+    const qs2 = new URLSearchParams({ ...params, crumb });
+    for (const host of hosts) {
+      try {
+        const rsp = await fetch(`${host}${path}?${qs2}`, {
+          headers: { 'User-Agent': UA, Accept: 'application/json', Cookie: cookie },
+          signal: AbortSignal.timeout(10000)
+        });
+        if (rsp.ok) return await rsp.json();
+        lastErr = `ياهو أعاد ${rsp.status} (مع crumb)`;
+      } catch (e) {
+        lastErr = e.name === 'TimeoutError' ? 'انتهت مهلة الطلب إلى ياهو' : (e.message || 'تعذّر الاتصال بياهو');
+      }
     }
-    /* 401/403 غالباً crumb منتهٍ — نجدّد ونعيد مرة واحدة فقط */
-    if ((r.status === 401 || r.status === 403) && needCrumb && attempt === 0) continue;
-
-    return {
-      ok: false,
-      status: r.status,
-      error: r.status === 429
-        ? 'المزوّد يخنق الطلبات (429). أبطئ المسح أو انتقل إلى مزوّد مدفوع.'
-        : `المزوّد أعاد ${r.status}`
-    };
+    /* الرمز صار قديماً — نُبطله ليُعاد جلبه في الطلب القادم */
+    _crumb = null; _cookie = null;
   }
-  return { ok: false, status: 502, error: 'فشل الاتصال بالمزوّد بعد محاولتين' };
+
+  const err = new Error(lastErr);
+  err.upstream = true;
+  throw err;
 }
 
-function setCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+/** ترويسات موحّدة: تخزين مؤقت قصير يخفّف الضغط دون تقديم بيانات بائتة. */
+export function setCache(res, seconds) {
+  res.setHeader('Cache-Control', `public, max-age=0, s-maxage=${seconds}, stale-while-revalidate=${seconds * 4}`);
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
 }
-
-module.exports = { yfetch, getCrumb, setCors, UA };
