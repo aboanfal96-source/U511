@@ -1,7 +1,10 @@
 {
-  "name": "us-market-pro",
-  "version": "3.0.0",
+  "name": "u511-us-market-pro",
+  "version": "2.0.0",
   "private": true,
-  "description": "منصة فلاتر السوق الأمريكي + تقييم عقود الأوبشن الأسبوعية",
-  "engines": { "node": ">=18" }
+  "type": "module",
+  "description": "منصة فلاتر السوق الأمريكي — تحليل زمني وتنبؤ وعقود أوبشن أسبوعية",
+  "engines": {
+    "node": ">=20"
+  }
 }
