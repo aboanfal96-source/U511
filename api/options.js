@@ -1,38 +1,51 @@
-/* /api/options — وكيل سلسلة عقود الأوبشن (Yahoo v7 options)
-   ──────────────────────────────────────────────────────────────────
-   بلا ?date  → يعيد أقرب استحقاق + قائمة كل تواريخ الاستحقاق.
-   مع  ?date  → يعيد سلسلة ذلك الاستحقاق بالضبط (unix seconds).
+/* ══════════════════════════════════════════════════════════════════════
+   /api/options — سلسلة عقود الأوبشن
+   يستدعيها optFetchChain() في الواجهة. تُعيد جسم ياهو كما هو
+   (optionChain.result) لأن الواجهة تقرأ منه calls/puts/expirationDates.
 
-   ⚠️ هذه النقطة تتطلب زوج كوكي/crumb من ياهو، وتُخنق بسرعة عند المسح
-      المتلاحق. الطبقة الأمامية تُبطئ بين الرموز عمداً لهذا السبب. */
-const { yfetch, setCors } = require('./_yahoo');
+   ⚠️ بيانات الأوبشن على المصادر المجانية متأخّرة ١٥ دقيقة، وفارق العرض
+   والطلب يتحرّك أسرع بكثير. هذه النقطة تنقل ما يصلها بأمانة ولا تدّعي
+   لحظية — والتحقق من السعر في منصة التنفيذ يبقى ضرورياً قبل أي أمر.
+   ══════════════════════════════════════════════════════════════════════ */
+import { yahooFetch, setCache } from './_yahoo.js';
 
-module.exports = async (req, res) => {
-  setCors(res);
-  if (req.method === 'OPTIONS') return res.status(204).end();
+export default async function handler(req, res) {
+  const symbol = String(req.query.symbol || '').trim().toUpperCase();
+  const date = String(req.query.date || '').trim();
 
-  const { symbol, date } = req.query || {};
-  if (!symbol || !/^[A-Za-z0-9.\-^]{1,12}$/.test(symbol))
-    return res.status(400).json({ error: 'رمز غير صالح' });
-  if (date && !/^\d{9,12}$/.test(String(date)))
-    return res.status(400).json({ error: 'تاريخ استحقاق غير صالح (المتوقع unix بالثواني)' });
+  if (!symbol || !/^[A-Z0-9.\-]{1,10}$/.test(symbol)) {
+    res.status(400).json({ error: 'رمز غير صالح' });
+    return;
+  }
+  /* تاريخ الاستحقاق يصل كطابع زمني يونكس بالثواني */
+  if (date && !/^\d{9,11}$/.test(date)) {
+    res.status(400).json({ error: 'تاريخ استحقاق غير صالح' });
+    return;
+  }
 
-  const sym = encodeURIComponent(symbol.toUpperCase());
-  const out = await yfetch((crumb) => {
-    const p = new URLSearchParams();
-    if (date) p.set('date', String(date));
-    if (crumb) p.set('crumb', crumb);
-    const qs = p.toString();
-    return `https://query2.finance.yahoo.com/v7/finance/options/${sym}${qs ? '?' + qs : ''}`;
-  }, { needCrumb: true });
+  try {
+    const params = {};
+    if (date) params.date = date;
 
-  if (!out.ok) return res.status(out.status).json({ error: out.error });
+    const data = await yahooFetch(`/v7/finance/options/${encodeURIComponent(symbol)}`, params);
 
-  const result = out.data?.optionChain?.result?.[0];
-  if (!result)
-    return res.status(404).json({ error: 'لا توجد عقود أوبشن مُدرجة لهذا الرمز' });
+    const result = data?.optionChain?.result?.[0];
+    if (!result) {
+      const why = data?.optionChain?.error?.description
+        || 'لا توجد سلسلة عقود لهذا الرمز — قد يكون بلا أوبشن مُدرج';
+      res.status(404).json({ error: why });
+      return;
+    }
+    if (!result.options?.[0]) {
+      res.status(404).json({ error: 'الاستجابة بلا عقود على هذا الاستحقاق' });
+      return;
+    }
 
-  /* سلسلة العقود تتحرّك خلال الجلسة — تخزين أقصر من الشموع. */
-  res.setHeader('Cache-Control', 's-maxage=20, stale-while-revalidate=60');
-  return res.status(200).json(out.data);
-};
+    /* ٤٥ ثانية: أقصر من تأخّر المصدر (١٥ دقيقة) فلا تُضيف بياتاً يُذكر،
+       وتكفي لمنع تكرار الطلب عند إعادة فتح نفس الرمز أثناء المسح. */
+    setCache(res, 45);
+    res.status(200).json(data);
+  } catch (e) {
+    res.status(e.upstream ? 502 : 500).json({ error: e.message || 'فشل غير معروف' });
+  }
+}
