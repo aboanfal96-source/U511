@@ -376,7 +376,8 @@ body{height:100%;background:var(--c0);color:var(--t1);font-family:'IBM Plex Sans
       </div>
       <button id="rdr-strict" onclick="radarToggleStrict(this)" class="scan-btn" style="background:transparent;border:1px solid var(--bd2);color:var(--t2);flex-shrink:0" title="لا يُعرض إلا سهم أثبتت دورته إصابتها على بيانات لم ترها (تماسك خارج العيّنة)">🧪 الدورات المؤكدة خارج العيّنة فقط</button>
       <button id="rdr-classic" onclick="radarToggleClassic(this)" class="scan-btn on" style="background:rgba(154,164,184,.12);border:1px solid var(--bd2);color:var(--t2);flex-shrink:0" title="النوافذ الكلاسيكية (غان/فيبوناتشي) أرقام مفروضة من خارج السهم — تُعرض كاحتياطي موسوم بضعفه">📐 إظهار الاحتياطي الكلاسيكي</button>
-      <span id="rdr-prog" style="font-size:10px;color:var(--t2);margin-right:auto">لم يُحسب بعد — يُحسب عند فتح التبويب فقط، لا داخل المسح الشامل</span>
+      <button onclick="radarStop()" class="scan-btn" style="background:rgba(240,68,88,.1);border:1px solid rgba(240,68,88,.3);color:#f04458;flex-shrink:0">⏹ إيقاف</button>
+      <span id="rdr-prog" style="font-size:10px;color:var(--t2);margin-right:auto;flex:1;min-width:180px">لم يُحسب بعد — يُحسب عند فتح التبويب فقط، لا داخل المسح الشامل</span>
     </div>
     <div id="spectral-scan-bar" style="display:none;padding:8px 12px;border-bottom:1px solid var(--bd);align-items:center;gap:10px;background:rgba(255,215,0,.04)">
       <button id="spectral-scan-btn" onclick="runSpectralScanAll()" class="scan-btn scan-sec" style="background:rgba(255,215,0,.12)!important;border-color:rgba(255,215,0,.3)!important;color:#FFD700!important;flex-shrink:0">🔄 امسح الآن لكل الأسهم</button>
@@ -900,7 +901,35 @@ const fK=n=>n>=1e9?(n/1e9).toFixed(1)+'B':n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(
 const Tm=()=>{const d=new Date();return`${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`};
 
 /* ══ STATE ══ */
-const G={sel:'SPY',tf:'3mo',tfi:'1d',pr:{},op:{},hi:{},lo:{},vo:{},ch:{},pc:{},cans:{},ind:{},sc:{},ld:new Set(),ldg:new Set(),demo:new Set(),failed:new Map(),lwChart:null,cSeries:null,vSeries:null,series:{}};
+/* ══════════════════════════════════════════════════════════════════════
+   🗄️ فصل مخزن التحليل عن مخزن الشارت — أصل ثلاثة أعطال في آن
+   ──────────────────────────────────────────────────────────────────────
+   كان G.cans مخزناً واحداً يقرأ منه *كل شيء*: الفلاتر، غرفة القرار،
+   التحليل الزمني، الأوبشن، والشارت. ونتج عن ذلك عطلان صامتان:
+
+   (١) عمق تاريخي غير كافٍ. المسح كان يحمّل 3mo/1d ≈ 63 جلسة. وهذا أقل
+       من كل عتبة في المحرّك: التحليل الطيفي يحتاج 60 (فيمرّ بلا قوة
+       إحصائية تُذكر، قِيس p=0.55 على سلسلة فيها دورة 21 جلسة حقيقية)،
+       وتماسك الدورة خارج العيّنة يحتاج 180، ودورات الارتكاز التجريبية
+       تحتاج 10 ارتكازات مؤكدة (يعطي 63 شمعة ستة فقط).
+       أي أن كل مصادر التوقيت كانت مغلقة سلفاً على كل سهم — ولهذا كان
+       «رادار الحركة المتوقعة» فارغاً دائماً، و«جاهزية الانطلاق» تعود null
+       فتُرفض كل الأسهم في وضع الانطلاق. لم يكن العطل في الرادار، بل في
+       البيانات التي يقرؤها.
+       القياس بعد التصحيح على نفس السلسلة بـ252 جلسة: p<0.001، والدورة
+       21.0 جلسة، والتماسك خارج العيّنة قابل للحساب.
+
+   (٢) اختلاط الوحدات. زر «يوم» يحمّل شموع 5 دقائق ويكتبها في G.cans،
+       فيصبح كل ما يليه محسوباً على شموع خمس دقائق وهو يعرضها باسم
+       «جلسة»: «الدورة المهيمنة 21 جلسة» تعني في الحقيقة 21 شمعة من خمس
+       دقائق (ساعة وخمس وأربعون دقيقة). ولا شيء في الواجهة كان يشير لذلك.
+
+   الآن: G.cans = تاريخ يومي عميق للتحليل فقط، لا يكتب فيه أحد غير
+   المحمّل التحليلي. G.chart = شموع الشارت بأي فريم يختاره المستخدم،
+   ولا يقرأ منها أي محرّك تحليل.
+   ══════════════════════════════════════════════════════════════════════ */
+const HIST = { range: '1y', interval: '1d', minBars: 200 };
+const G={sel:'SPY',tf:'3mo',tfi:'1d',chart:{sym:null,cs:null,ind:null},pr:{},op:{},hi:{},lo:{},vo:{},ch:{},pc:{},cans:{},ind:{},sc:{},ld:new Set(),ldg:new Set(),demo:new Set(),failed:new Map(),lwChart:null,cSeries:null,vSeries:null,series:{}};
 let _filter='all',_buyOnly=false,_sellOnly=false,_alertOnly=false,_sortCol='master',_sortDir=-1,_showBearish=false;
 let _visibleSyms=[],_focusedIdx=-1,_pinnedSym=null;
 const TAB_ORDER=['options','decision','all','vz','ma','rs','sq','ab','fg','hidden','pregap','fvgr','elliott','harmonic','hunter','time','sniper','whale','fib618','falsebreak','master','macd','instvol','revcandle'];
@@ -954,23 +983,60 @@ function applyY(sym,d){G.demo.delete(sym);G.failed.delete(sym);G.cans[sym]=d.cs;
    (2) لا ضمان توفّر ولا اتفاقية خدمة — تسقط بلا إنذار فتبقى المنصة على
    بيانات عشوائية، (3) على Vercel تعمل /api/stock من جهة الخادم أصلاً بلا
    قيد CORS، فوجود الوسطاء كان تعويضاً عن مشكلة غير موجودة في الإنتاج. */
+/** يحمّل التاريخ اليومي العميق المستخدم في *كل* التحليل. */
 async function loadStock(sym,range,interval){
-  if(G.ldg.has(sym))return;G.ldg.add(sym);
-  const r=range||G.tf,i=interval||G.tfi;let ok=false,reason='';
+  return _fetchCandles(sym, range||HIST.range, interval||HIST.interval, 'analysis');
+}
+
+/** يحمّل شموع الشارت وحده بفريم المستخدم — لا يمسّ مخزن التحليل. */
+async function loadChart(sym,range,interval){
+  return _fetchCandles(sym, range, interval, 'chart');
+}
+
+async function _fetchCandles(sym,r,i,dest){
+  const key=dest+'|'+sym;
+  if(G.ldg.has(key))return false;G.ldg.add(key);
+  let ok=false,reason='';
   try{
     const rsp=await fetch(`/api/stock?symbol=${encodeURIComponent(sym)}&range=${encodeURIComponent(r)}&interval=${encodeURIComponent(i)}`,{signal:AbortSignal.timeout(12000),cache:'no-store'});
     if(rsp.ok){
       const d=await rsp.json();
       const res=d?.chart?.result?.[0];
-      if(res){const p=parseY(res,sym);if(p){applyY(sym,p);ok=true;G.src=d._source||'?';}else reason='الاستجابة لا تحتوي شموعاً صالحة كافية';}
+      if(res){const p=parseY(res,sym);
+        if(p){
+          if(dest==='chart'){
+            /* شموع الشارت لا تدخل مخزن التحليل مهما كان فريمها */
+            G.chart={sym,cs:p.cs,ind:_indFrom(p.cs)};
+          }else{
+            applyY(sym,p);
+          }
+          ok=true;G.src=d._source||'?';
+        }else reason='الاستجابة لا تحتوي شموعاً صالحة كافية';}
       else reason=d?.error||d?.tried?.join(' | ')||'الاستجابة بلا نتائج';
     } else {
       reason=`الخادم أعاد ${rsp.status}`;
     }
   }catch(e){reason=e.name==='TimeoutError'?'انتهت مهلة الطلب':(e.message||'تعذّر الاتصال');}
-  if(!ok)G.failed.set(sym,reason);
-  G.ld.add(sym);G.ldg.delete(sym);
+  if(!ok&&dest==='analysis')G.failed.set(sym,reason);
+  if(dest==='analysis')G.ld.add(sym);
+  G.ldg.delete(key);
   return ok;
+}
+
+/** مؤشرات مستقلة لشموع الشارت — لا تُخزَّن في G.ind حتى لا تلوّث التحليل. */
+function _indFrom(cs){
+  try{
+    const cl=cs.map(c=>c.close);
+    return {sma20:sma(cl,20),sma50:sma(cl,50)};
+  }catch(e){return null;}
+}
+
+/** الشموع التي يرسمها الشارت: فريم المستخدم إن وُجد، وإلا التاريخ اليومي. */
+function chartCandles(sym){
+  return (G.chart.sym===sym&&G.chart.cs&&G.chart.cs.length)?G.chart.cs:G.cans[sym];
+}
+function chartInd(sym){
+  return (G.chart.sym===sym&&G.chart.ind)?G.chart.ind:G.ind[sym];
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -1010,8 +1076,13 @@ const OPT = {
  *  المسح على 238 رمزاً يستهلك حصص المزوّد بلا فائدة — أغلبها بلا سيولة
  *  أوبشن تُذكر. PRI هي القائمة التي يُتداول عليها فعلاً. */
 function optWatchlist() {
-  const extra = ['GOOGL', 'MSFT', 'AAPL', 'AMZN', 'META', 'NVDA', 'TSLA', 'AMD', 'SPY', 'QQQ'];
-  return [...new Set([...(typeof PRI !== 'undefined' ? PRI : []), ...extra])];
+  /* الأسهم والمؤشرات ذات سلاسل أسبوعية سائلة فعلاً. التوسيع خارج هذه
+     القائمة يستهلك حصص المزوّد على عقود فارقها بين العرض والطلب يبتلع
+     الحافة كاملة — أي أنه يضيف صفوفاً لا فرصاً. */
+  const core = ['SPY', 'QQQ', 'IWM', 'NVDA', 'TSLA', 'AAPL', 'AMZN', 'META', 'MSFT', 'GOOGL',
+    'AMD', 'AVGO', 'NFLX', 'MU', 'COIN', 'MSTR', 'PLTR', 'SMCI', 'BAC', 'SOFI',
+    'INTC', 'UBER', 'DIS', 'BA', 'JPM', 'XOM', 'GLD', 'TLT'];
+  return [...new Set([...(typeof PRI !== 'undefined' ? PRI : []), ...core])];
 }
 
 /* ══ 1) الجلب ══════════════════════════════════════════════════════════ */
@@ -1043,16 +1114,30 @@ async function optFetchChain(sym, expiryTs) {
 /** يختار الاستحقاق الأسبوعي المناسب: أقرب استحقاق يبقى له ٢–١٢ جلسة.
  *  عقد اليوم التالي ليس صفقة بل رهان على التوقيت الفوري، وعقد بعد شهر
  *  ليس «أسبوعياً» ويفقد الرافعة التي تُطلب من الأسبوعي أصلاً. */
-function optPickExpiry(expiries, minSessions = 2, maxSessions = 12) {
+function optPickExpiry(expiries, minSessions = 2, maxSessions = 10, turnBars = null) {
   if (!expiries || !expiries.length) return null;
   const M = window.KSAEngine?.USMarket;
   const now = new Date();
+
+  /* 🆕 محاذاة الاستحقاق مع نافذة التوقيت.
+     ──────────────────────────────────────────────────────────────────
+     كان الاختيار «أقرب استحقاق بين 2 و12 جلسة» بلا أي علاقة بالتحليل.
+     وهذا يُنتج الخطأ الأكثر تكلفة في الأوبشن الأسبوعي: عقد ينتهي قبل
+     موعد الحركة المتوقعة. إن كان الانعطاف بعد 6 جلسات وانتهى العقد بعد
+     4، فأنت دفعت العلاوة كاملة لتخرج قبل أن يبدأ ما اشتريته أصلاً.
+     الشرط الآن: يبقى للعقد جلستان على الأقل *بعد* موعد الانعطاف. */
+  const need = (turnBars != null && turnBars > 0) ? Math.round(turnBars) + 2 : minSessions;
+  const floorSess = Math.max(minSessions, need);
+
   let best = null;
   for (const ts of expiries) {
     const d = new Date(ts * 1000);
     if (d <= now) continue;
     const sess = M ? M.tradingDaysBetween(now, d) : Math.round((d - now) / 864e5);
-    if (sess >= minSessions && sess <= maxSessions) { best = { ts, sessions: sess, date: d }; break; }
+    if (sess >= floorSess && sess <= maxSessions) {
+      best = { ts, sessions: sess, date: d, alignedToTurn: turnBars != null && turnBars > 0 };
+      break;
+    }
   }
   if (!best) {
     /* لا شيء داخل النطاق: نأخذ أقرب استحقاق مستقبلي ونصرّح بالسبب */
@@ -1129,13 +1214,24 @@ function optBuildContext(sym, expiry) {
   const turnBars = (timing && timing.ok && timing.significant && timing.nextTurn)
     ? timing.nextTurn.barsAhead : null;
 
-  /* الهدف: الفراكتال أولاً إن كان في اتجاه الصفقة، وإلا الهدف البنيوي.
-     الترتيب مقصود — الفراكتال مستوى تداول فعلي، والبنيوي أوسع. */
-  let targetU = plan.target1;
-  let targetSrc = plan.targetSource;
-  if (dir.dirUp && frac?.ok && frac.target && frac.target > (G.pr[sym] || cs[cs.length - 1].close)) {
-    targetU = frac.target; targetSrc = frac.targetSource;
-  } else if (!dir.dirUp && frac?.ok && frac.support && frac.support < (G.pr[sym] || cs[cs.length - 1].close)) {
+  /* ── الهدف على السهم ──
+     🛠️ كان يؤخذ من executionPlan.target1 وهو «أقرب مقاومة بنيوية».
+     وأقرب مقاومة تبعد غالباً أقل من نصف ATR، فيخرج «هدف» داخل مدى
+     جلسة واحدة. وعلى الأوبشن تكلفة هذا الخطأ مضاعفة: العقد يُسعَّر
+     لحركة صغيرة، فيبتلع الفارق بين العرض والطلب والثيتا كل الربح
+     المفترض قبل أن يصل السهم إلى الرقم أصلاً.
+     الآن الهدف من النموذج البنيوي الذي يشترط مسافة تتجاوز 1.2×ATR. */
+  let entryU = plan.entry, stopU = plan.stop;
+  let targetU = plan.target1, targetSrc = plan.targetSource;
+  let ep = null;
+  if (dir.dirUp) {
+    try { ep = buildEntryPlan(sym, { minRR: 1.6 }); } catch (e) { }
+    if (ep && ep.targets && ep.targets.length) {
+      const t = ep.targets.find(x => x.structural) || ep.targets[0];
+      targetU = t.price; targetSrc = t.src;
+      entryU = ep.entry; stopU = ep.stop;
+    }
+  } else if (frac?.ok && frac.support && frac.support < (G.pr[sym] || cs[cs.length - 1].close)) {
     targetU = frac.support; targetSrc = 'أقرب قاع فراكتالي غير مكسور';
   }
 
@@ -1145,12 +1241,12 @@ function optBuildContext(sym, expiry) {
     candles: cs,
     chain: null,                    /* يُملأ عند الجلب */
     dirUp: dir.dirUp,
-    entryU: plan.entry, stopU: plan.stop, targetU, atr: plan.atr,
+    entryU, stopU, targetU, atr: ep ? ep.atr : plan.atr,
     cycleSessionsToTurn: turnBars,
     needsConfirmation: !dir.decisive,
     sessionsToExpiry: expiry?.sessions ?? null,
     expiryDate: expiry ? expiry.date.toLocaleDateString('ar-EG', { day: '2-digit', month: '2-digit', year: 'numeric' }) : null,
-    _meta: { dir, plan, frac, timing, targetSrc }
+    _meta: { dir, plan, frac, timing, targetSrc, ep }
   };
 }
 
@@ -1166,8 +1262,15 @@ async function optPlanFor(sym) {
     let expiries = OPT.expiries[sym];
     if (!expiries) { const probe = await optFetchChain(sym, null); expiries = probe.expiries; }
 
+    /* التوقيت يُقاس أولاً لأنه يحدّد أي استحقاق يصلح أصلاً */
+    let turnBars = null;
+    try {
+      const tm0 = ddTiming(sym);
+      if (tm0 && tm0.ok && tm0.significant && tm0.nextTurn) turnBars = tm0.nextTurn.barsAhead;
+    } catch (e) { }
+
     const pick = OPT.expiryChoice === 'auto'
-      ? optPickExpiry(expiries)
+      ? optPickExpiry(expiries, 2, 10, turnBars)
       : (() => {
           const ts = +OPT.expiryChoice, d = new Date(ts * 1000);
           const M = window.KSAEngine?.USMarket;
@@ -1291,13 +1394,17 @@ function optRenderTable() {
       «الدخول» هو منتصف العرض والطلب لا سعر آخر صفقة. «الوقف» و«الهدف» ليسا نسبتين من العلاوة —
       هما إعادة تسعير للعقد نفسه عند وقف السهم وهدفه البنيوي، مع خصم التآكل الزمني حتى ذلك اليوم.
       التوصية تجمع السيولة وتسعير التذبذب وملاءمة الوقت والعائد/المخاطرة معاً؛ اضغط أي صف لترى التفصيل.
+      <br><b style="color:#FFD700">عمود ⏱ التوقيت</b> هو الإضافة التي كانت غائبة: يقارن موعد الانعطاف المتوقع بعمر العقد.
+      <span style="color:#f04458">✗</span> يعني أن العقد ينتهي قبل الحركة أو عندها — أغلى خطأ في الأوبشن الأسبوعي،
+      لأنك تدفع العلاوة كاملة ثم تخرج قبل أن يبدأ ما اشتريته. واختيار الاستحقاق التلقائي صار يشترط بقاء
+      جلستين على الأقل بعد موعد الانعطاف.
     </div>
     <table style="width:100%;border-collapse:collapse;background:var(--c2);border-radius:9px;overflow:hidden">
       <thead><tr style="background:var(--c3)">
         <th style="${th}">الرمز</th><th style="${th}">النوع</th><th style="${th}">الاسترايك</th>
         <th style="${th}">الانتهاء</th><th style="${th}">السعر / الدخول</th><th style="${th}">الوقف</th>
         <th style="${th}">الهدف</th><th style="${th}">ع/م</th><th style="${th}">الدلتا</th>
-        <th style="${th}">IV/HV</th><th style="${th}">عقود</th><th style="${th}">التقييم</th><th style="${th}">التوصية</th>
+        <th style="${th}">IV/HV</th><th style="${th}" title="الانعطاف الزمني المتوقع مقابل عمر العقد">⏱ التوقيت</th><th style="${th}">عقود</th><th style="${th}">التقييم</th><th style="${th}">التوصية</th>
       </tr></thead>
       <tbody>${rows.map(p => {
         const c = p.contract, col = OPT_VC[p.verdict] || '#60a5fa';
@@ -1313,6 +1420,14 @@ function optRenderTable() {
           <td style="${td}"><b style="color:${c.rr >= 2 ? '#0ecf7e' : c.rr >= 1.5 ? '#f5c842' : '#f04458'}">${optNum(c.rr, 1)}</b></td>
           <td style="${td}">${optNum(c.delta, 2)}</td>
           <td style="${td}">${p.vol.ivHvRatio ?? '—'}</td>
+          <td style="${td}">${(() => {
+            const tb = p.underlying?.cycleSessionsToTurn;
+            if (tb == null) return '<span style="color:var(--t3)" title="لا دورة دالة — التوقيت من البنية السعرية وحدها">—</span>';
+            const fits = tb + 1 < p.sessionsToExpiry;
+            return `<span style="color:${fits ? '#0ecf7e' : '#f04458'};font-weight:700" title="${fits
+              ? 'العقد يعيش بعد موعد الانعطاف — الوقت في صفّك'
+              : 'الانعطاف المتوقع بعد انتهاء العقد أو عنده — تدفع العلاوة ثم تخرج قبل الحركة'}">${tb}ج / ${p.sessionsToExpiry}ج ${fits ? '✓' : '✗'}</span>`;
+          })()}</td>
           <td style="${td}">${n ?? '—'}<div style="font-size:9px;color:var(--t3)">${p.riskPerContractUsd ? '$' + p.riskPerContractUsd + '/عقد' : ''}</div></td>
           <td style="${td}"><b>${c.score}</b></td>
           <td style="${td}"><span style="background:${col}22;color:${col};border:1px solid ${col}55;border-radius:5px;padding:3px 9px;font-size:10px;font-weight:700">${p.verdictLabel}</span></td>
@@ -3605,8 +3720,9 @@ function initChart(){
 }
 
 function updateChart(sym){
-  if(!G.lwChart||!G.cSeries||!G.cans[sym])return;
-  const cs=G.cans[sym],ind=G.ind[sym];
+  const cs=chartCandles(sym);
+  if(!G.lwChart||!G.cSeries||!cs||!cs.length)return;
+  const ind=chartInd(sym);
   G.cSeries.setData(cs.map(c=>({time:c.time,open:c.open,high:c.high,low:c.low,close:c.close})));
   G.vSeries.setData(cs.map(c=>({time:c.time,value:c.volume,color:c.close>=c.open?'rgba(14,207,126,.12)':'rgba(240,68,88,.12)'})));
   if(ind?.sma20)G.series.s20.setData(cs.map((c,i)=>ind.sma20[i]!=null?{time:c.time,value:ind.sma20[i]}:null).filter(Boolean));
@@ -3958,15 +4074,25 @@ function updateHeader(sym){
 
 function selectStock(sym){
   G.sel=sym;updateHeader(sym);updateChart(sym);updateTradePlan(sym);
-  if(!G.ld.has(sym)&&!G.ldg.has(sym)){loadStock(sym).then(()=>{calcInd(sym);updateHeader(sym);updateChart(sym);updateTradePlan(sym);});}
+  G.chart={sym:null,cs:null,ind:null};
+  /* يُعاد التحميل أيضاً إن كان التاريخ المخزَّن أقصر من عمق التحليل —
+     وهو ما يحدث للأسهم التي حُمّلت في نسخة سابقة بعمق 3 أشهر. */
+  const need=!G.cans[sym]||G.cans[sym].length<HIST.minBars;
+  if(need&&!G.ldg.has('analysis|'+sym)){
+    loadStock(sym).then(()=>{calcInd(sym);updateHeader(sym);updateChart(sym);updateTradePlan(sym);_chartFrameNote();});
+  }else{_chartFrameNote();}
 }
 
 function setTF(range,interval,el){
   G.tf=range;G.tfi=interval;document.querySelectorAll('.tf').forEach(b=>b.classList.remove('on'));el.classList.add('on');
   document.querySelectorAll('.tf-interval').forEach(b=>b.classList.toggle('on',b.dataset.itv===interval));
-  const sym=G.sel;delete G.cans[sym];G.ld.delete(sym);G.ldg.delete(sym);
+  const sym=G.sel;
+  /* 🛠️ لم يعد يُحذف مخزن التحليل. تغيير فريم الشارت مسألة عرض بحتة،
+     وكان حذفه يمحو التاريخ اليومي ثم يستبدله بشموع خمس دقائق فتُقاس
+     «الدورات بالجلسات» على شموع خمس دقائق بلا أي إشارة للمستخدم. */
+  G.chart={sym:null,cs:null,ind:null};
   if(G.harmCache)delete G.harmCache[sym];if(G.ewCache)delete G.ewCache[sym];if(G.wolfeCache)delete G.wolfeCache[sym];if(G.chanCache)delete G.chanCache[sym];
-  loadStock(sym,range,interval).then(()=>{calcInd(sym);updateHeader(sym);updateChart(sym);updateTradePlan(sym);});
+  loadChart(sym,range,interval).then(()=>{updateHeader(sym);updateChart(sym);updateTradePlan(sym);_chartFrameNote();});
 }
 function setChartInterval(interval,el){
   /* Quick daily/hourly toggle — keeps the current range if it still makes
@@ -3986,9 +4112,13 @@ function setChartInterval(interval,el){
     b.classList.toggle('on',onclick.includes(`'${range}','${interval}'`));
   });
   G.tf=range;G.tfi=interval;
-  const sym=G.sel;delete G.cans[sym];G.ld.delete(sym);G.ldg.delete(sym);
+  const sym=G.sel;
+  /* 🛠️ لم يعد يُحذف مخزن التحليل. تغيير فريم الشارت مسألة عرض بحتة،
+     وكان حذفه يمحو التاريخ اليومي ثم يستبدله بشموع خمس دقائق فتُقاس
+     «الدورات بالجلسات» على شموع خمس دقائق بلا أي إشارة للمستخدم. */
+  G.chart={sym:null,cs:null,ind:null};
   if(G.harmCache)delete G.harmCache[sym];if(G.ewCache)delete G.ewCache[sym];if(G.wolfeCache)delete G.wolfeCache[sym];if(G.chanCache)delete G.chanCache[sym];
-  loadStock(sym,range,interval).then(()=>{calcInd(sym);updateHeader(sym);updateChart(sym);updateTradePlan(sym);});
+  loadChart(sym,range,interval).then(()=>{updateHeader(sym);updateChart(sym);updateTradePlan(sym);_chartFrameNote();});
 }
 
 /* ══ TRADE PLAN PANEL ══ */
@@ -4063,6 +4193,28 @@ function updateTradePlan(sym){
 }
 
 /* ══ AI ══ */
+/** يُظهر شريطاً صريحاً حين يعرض الشارت فريماً غير الفريم الذي يُحلَّل عليه.
+ *  بدون هذا يظنّ المستخدم أن «خطة التداول» و«التحليل الزمني» محسوبان على
+ *  ما يراه أمامه، وهما دائماً محسوبان على الشموع اليومية. */
+function _chartFrameNote(){
+  const el=document.getElementById('demo-warn');
+  if(!el)return;
+  const sym=G.sel;
+  if(G.chart.sym===sym&&G.chart.cs&&G.tfi!=='1d'){
+    el.style.display='flex';
+    el.style.background='rgba(74,158,255,.14)';
+    el.style.borderColor='rgba(74,158,255,.35)';
+    el.style.color='#4a9eff';
+    el.textContent=`📊 الشارت يعرض فريم ${G.tfi==='5m'?'٥ دقائق':G.tfi==='15m'?'١٥ دقيقة':G.tfi==='1h'?'الساعة':G.tfi} — أما خطة التداول والتحليل الزمني وغرفة القرار فمحسوبة كلها على الشموع اليومية (${(G.cans[sym]||[]).length} جلسة). الفريم للعرض لا للحساب.`;
+  }else if(G.demo.has(sym)){
+    /* رسالة البيانات التجريبية تُعاد من مكانها الأصلي */
+    el.style.display='flex';
+  }else{
+    el.style.display='none';
+  }
+}
+window._chartFrameNote=_chartFrameNote;
+
 function toggleAI(){_aiOpen=!_aiOpen;document.getElementById('ai-body').style.display=_aiOpen?'block':'none';document.getElementById('ai-arrow').textContent=_aiOpen?'▲':'▼';}
 
 async function runAI(){
@@ -6726,12 +6878,12 @@ function ddAddFromDecision(sym) {
     id: Date.now(), sym, name: r.name, sec: r.sec, qty, entry: +entry.toFixed(2),
     /* 🛠️ كان يسجّل tp.targets[0] وهو محسوب من السعر الحالي، فقد يقع تحت
        سعر التنفيذ في وضع الاختراق. المعتمد هو الهدف الذي أقرّه القرار. */
-    stop: r.tp.stop, t1: r.finalTarget,
-    t2: (r.tp.targets || []).map(t => t.price).find(p => p > r.finalTarget * 1.005) ?? null,
+    stop: r.ep ? r.ep.stop : r.tp.stop, t1: r.finalTarget,
+    t2: ((r.ep && r.ep.targets) || r.tp.targets || []).map(t => t.price).find(p => p > r.finalTarget * 1.005) ?? null,
     ts: Date.now(), t1Taken: false, why: r.label
   });
   DD.save(); ddUpdateBar();
-  alert(`✅ سُجّل المركز: ${qty} سهم من ${sym} عند ${entry}$\nالوقف ${r.tp.stop} · الهدف ${r.finalTarget}`);
+  alert(`✅ سُجّل المركز: ${qty} سهم من ${sym} عند ${entry}$\nالوقف ${r.ep ? r.ep.stop : r.tp.stop} · الهدف ${r.finalTarget}`);
   if (document.getElementById('tar-overlay')?.style.display === 'block') ddBook();
 }
 window.ddAddFromDecision = ddAddFromDecision;
@@ -7161,12 +7313,14 @@ function ddDecide2(d, regime, mode) {
     pass('الأدلة الفنية', `${ev.A.length} فئة (أ) · ${ev.B.length} داعمة · ${ev.C.length} مضادة · موحّدة ${d.masterScore}`);
   }
 
-  /* ⑤ الخطة — والهدف الفراكتالي يحلّ محل الهدف الافتراضي حين يكون متاحاً */
+  /* ⑤ الخطة — من النموذج البنيوي الجديد (buildEntryPlan) لا من المتوسطات */
+  const ep = buildEntryPlan(sym, { minRR: mode === 'launch' ? 1.2 : DD.cfg.minRR });
+  if (!ep) return fail('الخطة التنفيذية', 'تعذّر بناء خطة بنيوية (تاريخ غير كافٍ أو بنية غير واضحة)');
   const tp = calcTradePlan(sym);
   if (!tp) return fail('الخطة التنفيذية', 'تعذّر بناء خطة دخول/وقف/هدف');
   const verdict = calcEntryVerdict(sym, tp);
   const ind = G.ind[sym] || {};
-  const atr = ind.atr > 0 ? ind.atr : d.price * 0.015;
+  const atr = ep.atr;
 
   /* ══════════════════════════════════════════════════════════════════
      🛠️ إصلاح جوهري: كل الأرقام تُحسب من **سعر التنفيذ الفعلي**، لا من
@@ -7206,69 +7360,59 @@ function ddDecide2(d, regime, mode) {
     else { action = 'watch'; label = '👁 مراقبة'; color = '#7a8ba8'; }
   }
 
-  /* ── ② سعر التنفيذ ── */
-  const trigPrice = fr?.ok && fr.target1 ? +(fr.target1 * 1.003).toFixed(2) : tp.entry;
-  const execPrice = mode === 'launch'
-    ? (action === 'buy' ? d.price : trigPrice)
-    : (action === 'buy_stop' ? tp.entry : action === 'wait' ? (verdict?.bestEntry ?? tp.entry) : tp.entry);
+  /* ── ② سعر التنفيذ: من نطاق الدخول البنيوي ──
+     في وضع الانطلاق يُنفَّذ عند حافة النطاق العليا (زناد الاختراق)، وفي
+     وضع التنفيذ عند وسط النطاق. وفي الحالتين يُقاس كل شيء من هذا السعر. */
+  /* 🛠️ كان التنفيذ في وضع الانطلاق يُوضع عند حافة النطاق العليا، فيقع
+     أحياناً **فوق سقف المطاردة الذي تحسبه الخطة نفسها** — أي أن الخطة
+     تناقض نفسها: تقول «لا تشترِ فوق ١٠٣٫٤٨» ثم تُنفّذ عند ١٠٣٫٥٦.
+     الآن: زناد الاختراق هو حافة النطاق السفلى (وهي مستوى الكسر + الهامش)،
+     وأي سعر تنفيذ يُقصّ عند سقف المطاردة. */
+  let execPrice = (ep.style === 'breakout') ? ep.entryLo : ep.entry;
+  if (ep.chaseCap != null && execPrice > ep.chaseCap) execPrice = ep.chaseCap;
+  execPrice = +execPrice.toFixed(2);
 
   if (!(execPrice > 0)) return fail('الخطة التنفيذية', 'سعر تنفيذ غير صالح');
-  if (!(tp.stop < execPrice))
-    return fail('الخطة التنفيذية', `الوقف ${tp.stop} فوق سعر التنفيذ ${execPrice} — خطة مقلوبة، تُرفض ولا تُعرض`);
+  if (!(ep.stop < execPrice))
+    return fail('الخطة التنفيذية', `الوقف ${ep.stop} فوق سعر التنفيذ ${execPrice} — خطة مقلوبة، تُرفض ولا تُعرض`);
 
-  /* ── ③ الهدف: فوق سعر التنفيذ حصراً ──
-     الترتيب بنيوي: القمة الفراكتالية الحيّة، ثم الحركة المقيسة، ثم أقرب
-     مقاومة هيكلية، وأخيراً امتداد 2R موسوماً بأنه امتداد لا مستوى. */
-  const MIN_UP = execPrice * 1.005;
-  const cands = [];
-  if (fr?.ok) {
-    if (fr.target1 > MIN_UP) cands.push({ p: fr.target1, s: 'أقرب قمة فراكتالية غير مكسورة', frac: true });
-    if (fr.target2 > MIN_UP) cands.push({ p: fr.target2, s: 'القمة الفراكتالية التالية', frac: true });
-    if (fr.measuredMove > MIN_UP) cands.push({ p: fr.measuredMove, s: 'حركة مقيسة من آخر ساق دافعة', frac: true });
-  }
-  for (const t of (tp.targets || [])) if (t.price > MIN_UP) cands.push({ p: t.price, s: t.source, frac: false });
-  cands.sort((a, b) => a.p - b.p);
+  /* ── ③ الهدف: أول هدف بنيوي فوق سعر التنفيذ بمسافة معتبرة ── */
+  const riskPS = +(execPrice - ep.stop).toFixed(2);
+  const MIN_T = execPrice + 1.2 * atr;
+  const chosen = ep.targets.find(t => t.price > MIN_T)
+    || ep.targets.find(t => t.price > execPrice * 1.005)
+    || null;
+  if (!chosen) return fail('الخطة التنفيذية',
+    `لا هدف بنيوي فوق سعر التنفيذ ${execPrice} بمسافة تتجاوز 1.2×ATR — الصعود محشور بين مقاومات متلاصقة`);
 
-  const riskPS = +(execPrice - tp.stop).toFixed(2);
-  let chosen = cands[0] || null;
-  if (!chosen && riskPS > 0) {
-    chosen = { p: +(execPrice + riskPS * 2).toFixed(2), s: 'امتداد 2R — لا يوجد مستوى بنيوي فوق سعر التنفيذ', frac: false, synthetic: true };
-  }
-  if (!chosen) return fail('الخطة التنفيذية', 'لا يوجد هدف صالح فوق سعر التنفيذ');
-
-  const finalTarget = +(+chosen.p).toFixed(2);
-  const fracTarget = chosen.frac ? finalTarget : null;
-  const fracSrc = chosen.s;
+  const finalTarget = chosen.price;
+  const fracTarget = chosen.structural ? finalTarget : null;
+  const fracSrc = chosen.src;
   const fracUp = +((finalTarget - execPrice) / execPrice * 100).toFixed(2);
 
   /* ── ④ العائد والمخاطرة — من سعر التنفيذ ── */
   const rr = riskPS > 0 ? +((finalTarget - execPrice) / riskPS).toFixed(2) : null;
-  const rrSrc = chosen.synthetic ? 'امتداد 2R (لا مستوى بنيوي)'
-    : chosen.frac ? 'هدف فراكتالي' : 'هدف هيكلي';
+  const rrSrc = chosen.structural ? chosen.src : 'امتداد R (لا مستوى بنيوي)';
   const stopATR = +(riskPS / atr).toFixed(2);
-  const minRR = mode === 'launch' ? 1.0 : DD.cfg.minRR;
+  const minRR = mode === 'launch' ? 1.2 : DD.cfg.minRR;
 
   if (!(rr >= minRR)) return fail('المخاطرة/العائد',
-    `العائد ${rr ?? '—'}R (${rrSrc}) دون الحد ${minRR}R — محسوب من سعر التنفيذ ${execPrice} لا من السعر الحالي`);
-  if (stopATR > 3.5) return fail('المخاطرة/العائد', `الوقف يبعد ${stopATR}×ATR عن سعر التنفيذ — أوسع من أن يُدار`);
-  if (stopATR < 0.6) return fail('المخاطرة/العائد', `الوقف يبعد ${stopATR}×ATR — سيُضرب بالضجيج اليومي`);
-  pass('المخاطرة/العائد', `العائد ${rr}R (${rrSrc}) · المخاطرة ${riskPS}$/سهم من سعر التنفيذ ${execPrice} · مسافة الوقف ${stopATR}×ATR`);
+    `العائد ${rr ?? '—'}R دون الحد ${minRR}R — محسوب من سعر التنفيذ ${execPrice} إلى ${finalTarget} (${fracSrc})`);
+  if (stopATR > 3.2) return fail('المخاطرة/العائد', `الوقف يبعد ${stopATR}×ATR عن سعر التنفيذ — أوسع من أن يُدار`);
+  if (stopATR < 0.5) return fail('المخاطرة/العائد', `الوقف يبعد ${stopATR}×ATR — سيُضرب بالضجيج اليومي`);
+  pass('المخاطرة/العائد', `العائد ${rr}R · المخاطرة ${riskPS}$/سهم من ${execPrice} · الوقف ${stopATR}×ATR · الهدف من ${fracSrc}`);
 
-  /* ⑥ حجم المركز — من سعر التنفيذ أيضاً، لا من السعر الحالي */
-  const size = ddSize(execPrice, tp.stop, liq, d.sec || secName(sym), regime.mult);
+  /* ⑥ حجم المركز — من سعر التنفيذ ووقفه */
+  const size = ddSize(execPrice, ep.stop, liq, d.sec || secName(sym), regime.mult);
   if (!size.ok) return fail('حجم المركز', size.why);
   pass('حجم المركز', size.why);
 
   const qty = action === 'buy_half' ? Math.floor(size.qty / 2) : size.qty;
 
-  const trigger = mode === 'launch'
-    ? (action === 'buy'
-      ? `السهم ملفوف وجاهز — دخول عند السعر الحالي، والزناد التأكيدي إغلاق فوق ${fr?.target1 ?? '—'}`
-      : `أمر شراء موقوف فوق ${trigPrice}$ (كسر أقرب قمة فراكتالية) — لا تشترِ تحته، السهم ما زال في مرحلة اللف. والهدف ${finalTarget}$ فوق الزناد لا عنده.`)
-    : (action === 'buy' ? 'نفّذ عند السعر الحالي — الارتداد وقع فعلاً'
-      : action === 'buy_stop' ? `أمر شراء موقوف عند ${tp.entry}$`
-        : action === 'buy_half' ? 'نصف الكمية الآن، والباقي بعد إغلاق فوق الهدف الأول'
-          : action === 'wait' ? (verdict?.bestEntryWhy || '—') : 'تحت المراقبة');
+  const chaseLine = ep.chaseCap ? ` سقف المطاردة ${ep.chaseCap}$ — لا تشترِ فوقه.` : '';
+  const trigger = (mode === 'launch' && action !== 'buy')
+    ? `أمر شراء موقوف عند ${ep.entryHi}$ — ${ep.entryWhy}${chaseLine}`
+    : `نطاق الدخول ${ep.entryLo} – ${ep.entryHi}$ — ${ep.entryWhy}${chaseLine}`;
 
   const sessionsToT = atr > 0 ? Math.ceil((finalTarget - execPrice) / atr) : null;
 
@@ -7279,7 +7423,8 @@ function ddDecide2(d, regime, mode) {
 
   return {
     sym, name: d.name, price: d.price, pct: d.pct, sec: d.sec, mode,
-    action, label, color, gates, ev, tp, verdict, size, liq, atr, rr, rrSrc, stopATR,
+    action, label, color, gates, ev, tp, ep, verdict, size, liq, atr, rr, rrSrc, stopATR,
+    riskPS,
     launch, timing: tm, frac: fr,
     fracTarget, fracSrc, fracUp,
     finalTarget, qty, execPrice, trigger, sessionsToT,
@@ -7394,7 +7539,7 @@ function ddRenderTable2() {
       <td><span style="color:${r.color};font-weight:700;white-space:nowrap">${r.label}</span></td>
       <td>${r.launch ? bar(r.launch.score, 100, lc) : '—'}</td>
       <td style="font-family:monospace;color:#FFD700;font-weight:700">${r.execPrice}</td>
-      <td style="font-family:monospace;color:var(--dn)">${r.tp.stop}</td>
+      <td style="font-family:monospace;color:var(--dn)">${r.ep.stop}</td>
       <td style="font-family:monospace;color:var(--up);font-weight:700" title="${r.fracSrc || 'هدف هيكلي'}">
         ${r.finalTarget}${r.fracUp != null ? `<span style="color:var(--t3);font-weight:400"> +${r.fracUp}%</span>` : ''}</td>
       <td style="font-family:monospace;font-weight:700">1:${r.rr}</td>
@@ -7523,11 +7668,49 @@ function ddReport2(sym) {
   const html = `
     ${timeActivationCard(r.sym)}
 
+    ${r.ep ? `<div style="${SEC_}border-color:rgba(255,215,0,.35)">
+      <div style="${HEAD}">🎯 نطاق الدخول والوقف والأهداف — من بنية السعر</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:11px">
+        <div style="background:#1b2233;border-radius:7px;padding:8px 10px;text-align:center">
+          <div style="font-size:10px;color:#9aa4b8">نطاق الدخول</div>
+          <div style="font-size:14px;font-weight:800;color:#FFD700">${r.ep.entryLo} – ${r.ep.entryHi}</div></div>
+        <div style="background:#1b2233;border-radius:7px;padding:8px 10px;text-align:center">
+          <div style="font-size:10px;color:#9aa4b8">سقف المطاردة</div>
+          <div style="font-size:14px;font-weight:800;color:#fb923c">${r.ep.chaseCap ?? '—'}</div></div>
+        <div style="background:#1b2233;border-radius:7px;padding:8px 10px;text-align:center">
+          <div style="font-size:10px;color:#9aa4b8">الوقف</div>
+          <div style="font-size:14px;font-weight:800;color:#f04458">${r.ep.stop}</div></div>
+        <div style="background:#1b2233;border-radius:7px;padding:8px 10px;text-align:center">
+          <div style="font-size:10px;color:#9aa4b8">المخاطرة/سهم</div>
+          <div style="font-size:14px;font-weight:800">${r.riskPS ?? r.ep.risk}$</div></div>
+      </div>
+      <div style="${ROW}"><b>نمط الدخول:</b> ${r.ep.style === 'breakout' ? 'اختراق فوق مقاومة' : r.ep.style === 'bounce' ? 'ارتداد من دعم' : 'دخول عند السعر'}</div>
+      <div style="${ROW};color:#c8d0e0;font-size:12.5px">${r.ep.entryWhy}</div>
+      ${r.ep.chaseNote ? `<div style="margin:8px 0;padding:9px 11px;background:rgba(251,146,60,.09);border:1px solid rgba(251,146,60,.3);border-radius:7px;font-size:12.5px">${r.ep.chaseNote}</div>` : ''}
+      ${r.ep.obstacles && r.ep.obstacles.length ? `<div style="margin:8px 0;padding:9px 11px;background:rgba(154,164,184,.07);border:1px solid rgba(154,164,184,.25);border-radius:7px;font-size:12.5px">
+        <b>🚧 عوائق في الطريق</b> — مستويات بيع بين الدخول والهدف، ليست أهدافاً:
+        ${r.ep.obstacles.map(o => `<div style="margin-top:4px;color:#9aa4b8">• ${o.price} (${o.rr}R) — ${o.src}</div>`).join('')}
+        <div style="margin-top:5px;font-size:11.5px;color:#9aa4b8">${r.ep.obstacleNote}</div>
+      </div>` : ''}
+      <div style="${ROW}"><b>مصدر الوقف:</b> <span style="color:#9aa4b8">${r.ep.stopSrc}</span> · مسافته ${r.stopATR}×ATR</div>
+      <div style="margin-top:10px;padding-top:8px;border-top:1px dashed rgba(255,255,255,.08)">
+        ${r.ep.targets.map((t, i) => `<div style="${ROW}">🎯 هدف ${i + 1}: <b style="color:${t.structural ? '#0ecf7e' : '#7a8ba8'}">${t.price}</b>
+          — العائد <b>${t.rr}R</b> <span style="font-size:11.5px;color:#9aa4b8">(${t.src})</span>
+          ${t.structural ? '' : '<span style="color:#f5c842;font-size:11px"> ⚠ ليس مستوى بنيوي</span>'}</div>`).join('')}
+      </div>
+      <div style="margin-top:10px;font-size:11.5px;color:#9aa4b8;line-height:1.8">
+        الأهداف هنا <b>قمم سعرية حقيقية</b> فقط — حيث تنتظر أوامر بيع فعلية لأن أناساً اشتروا هناك.
+        لا يدخل المتوسط المتحرك ولا حافة بولينجر هذه القائمة: هي أرقام تتغيّر كل جلسة، واستهدافها
+        يعني استهداف مكان سيكون في مكان آخر حين تصل إليه. ويُشترط في الهدف الأول مسافة تتجاوز
+        1.2×ATR، لأن هدفاً داخل مدى جلسة واحدة ليس هدفاً.
+      </div>
+    </div>` : ''}
+
     <div style="${SEC_}border-color:${r.color}55;background:${r.color}0a">
       <div style="font-size:20px;font-weight:800;color:${r.color};margin-bottom:8px">${r.label}</div>
       <div style="font-size:13px;line-height:2">
         السعر: <b>${r.price}</b> · التنفيذ: <b style="color:#FFD700">${r.execPrice}</b> · الكمية: <b>${ddFmt(r.qty)}</b> سهم<br>
-        الوقف: <b style="color:#f04458">${r.tp.stop}</b> · الهدف: <b style="color:#0ecf7e">${r.finalTarget}</b>
+        الوقف: <b style="color:#f04458">${r.ep.stop}</b> · الهدف: <b style="color:#0ecf7e">${r.finalTarget}</b>
         <span style="font-size:11.5px;color:#9aa4b8">(${r.rrSrc})</span> · العائد/المخاطرة: <b>1:${r.rr}</b><br>
         إجمالي المخاطرة: <b>${ddFmt(Math.round(r.qty * r.size.riskPerShare))}</b>$
         (${(r.qty * r.size.riskPerShare / DD.cfg.capital * 100).toFixed(2)}٪ من رأس المال) ·
@@ -7562,7 +7745,7 @@ function ddReport2(sym) {
 
     <div style="${SEC_}border-color:rgba(167,139,250,.3)">
       <div style="${HEAD}">🔴 قواعد الخروج المسبقة</div>
-      <div style="${ROW}">① كسر ${r.tp.stop} ⟵ خروج كامل، بلا مراجعة.</div>
+      <div style="${ROW}">① كسر ${r.ep.stop} ⟵ خروج كامل، بلا مراجعة.</div>
       <div style="${ROW}">② بلوغ ${r.finalTarget} ⟵ بيع النصف ونقل الوقف إلى ${r.execPrice}.</div>
       <div style="${ROW}">③ بعد 1R ⟵ وقف متحرك = أعلى قمة − ${DD.cfg.trailATR}×ATR (${(r.atr * DD.cfg.trailATR).toFixed(2)}$).</div>
       <div style="${ROW}">④ انتفاء دليلين ⟵ خروج كامل حتى بلا كسر الوقف.</div>
@@ -7583,6 +7766,238 @@ function ddReport2(sym) {
 window.ddReport2 = ddReport2;
 window.ddReport = ddReport2;
 
+
+/* ══════════════════════════════════════════════════════════════════════
+   🎯 نموذج الدخول والأهداف — أُعيد بناؤه من الصفر
+   ──────────────────────────────────────────────────────────────────────
+   الشكوى كانت: «نقطة الدخول والأهداف سيئة». والسبب ثلاثة عيوب بنيوية في
+   calcSupportResistance الذي كانت تُبنى عليه الخطة كلها:
+
+   ① كان يخلط **مستويات ثابتة** بـ**مستويات متحركة**. القمة السعرية عند
+      112.40 مستوى حقيقي: هناك أوامر بيع معلّقة عنده لأن أناساً اشتروا
+      هناك وانتظروا. أما «المتوسط المتحرك 20» فليس مستوى — هو رقم يتغيّر
+      كل جلسة، ووضعه هدفاً يعني استهداف رقم سيكون مكاناً آخر حين تصل
+      إليه. وكان MA20 و MA50 وحافة بولينجر و VWAP كلها تدخل قائمة
+      «الأهداف» جنباً إلى جنب مع القمم الحقيقية.
+
+   ② كان يأخذ **أقرب** مقاومة هدفاً أول. وأقرب مقاومة هي غالباً على بعد
+      0.5٪ — فيخرج «هدف» أقرب من ضجيج الجلسة الواحدة، وعائد/مخاطرة
+      وهمي، ثم تُرفض الصفقة عند بوابة العائد. وهذا أحد سببَي «القرارات
+      قليلة».
+
+   ③ كان الدخول سعراً واحداً: السعر الحالي، أو المقاومة × 1.003. والـ
+      0.3٪ رقم ثابت لا علاقة له بتذبذب السهم: على سهم يتحرك 4٪ يومياً
+      هو داخل الضجيج تماماً، وعلى سهم يتحرك 0.8٪ هو قفزة.
+
+   البديل هنا:
+   • الأهداف من **بنية السعر وحدها**: قمم متأرجحة مؤكدة، قمم فراكتالية
+     حيّة، الحركة المقيسة، وقمة النطاق السنوي. لا متوسطات متحركة إطلاقاً.
+   • يُشترط في الهدف الأول مسافة لا تقل عن **1.2×ATR** عن الدخول، وإلا
+     يُتخطّى إلى الذي يليه. هدف داخل مدى جلسة واحدة ليس هدفاً.
+   • الدخول **نطاق** لا نقطة، وله **سقف مطاردة** صريح: أعلى سعر يبقى
+     العائد عنده مقبولاً. وهو الرقم الذي يحتاجه المتداول فعلاً ولم يكن
+     معروضاً أبداً.
+   • مسافة الاختراق مشتقة من ATR (0.15×ATR) لا من نسبة ثابتة.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/** قمم/قيعان متأرجحة مؤكدة — بنية سعرية خالصة، بلا أي متوسط متحرك. */
+function swingLevels(cs, k) {
+  k = k || 3;
+  const n = cs.length, hi = [], lo = [];
+  for (let i = k; i < n - k; i++) {
+    let isH = true, isL = true;
+    for (let j = 1; j <= k; j++) {
+      if (!(cs[i].high >= cs[i - j].high && cs[i].high >= cs[i + j].high)) isH = false;
+      if (!(cs[i].low <= cs[i - j].low && cs[i].low <= cs[i + j].low)) isL = false;
+    }
+    if (isH) hi.push({ i, price: cs[i].high });
+    if (isL) lo.push({ i, price: cs[i].low });
+  }
+  return { hi, lo };
+}
+
+/** يدمج المستويات المتقاربة ويزن كلٌّ منها بعدد اللمسات وحداثتها.
+ *  مستوى لُمس أربع مرات أقوى من مستوى لُمس مرة، ولمسة قبل شهر أهم من
+ *  لمسة قبل سنة — وهذا ما لم يكن يُقاس سابقاً إطلاقاً. */
+function mergeLevels(pts, n, atr) {
+  const tol = Math.max(atr * 0.6, 0.004 * (pts[0]?.price || 1));
+  const sorted = [...pts].sort((a, b) => a.price - b.price);
+  const out = [];
+  for (const p of sorted) {
+    const last = out[out.length - 1];
+    if (last && Math.abs(p.price - last.price) <= tol) {
+      last.touches++;
+      last.lastIdx = Math.max(last.lastIdx, p.i);
+      last.price = (last.price * (last.touches - 1) + p.price) / last.touches;
+    } else {
+      out.push({ price: p.price, touches: 1, lastIdx: p.i });
+    }
+  }
+  return out.map(l => {
+    const age = (n - 1 - l.lastIdx) / Math.max(1, n);
+    return {
+      price: +l.price.toFixed(2),
+      touches: l.touches,
+      barsAgo: n - 1 - l.lastIdx,
+      /* الوزن: اللمسات تبني القوة، والقِدم يستهلكها */
+      weight: +(l.touches * (1 - 0.55 * age)).toFixed(2)
+    };
+  });
+}
+
+/**
+ * خطة دخول/وقف/أهداف بنيوية.
+ * @returns {null|object}
+ */
+function buildEntryPlan(sym, opts) {
+  opts = opts || {};
+  const cs = G.cans[sym];
+  if (!cs || cs.length < 60) return null;
+  const ind = G.ind[sym] || {};
+  const n = cs.length;
+  const price = cs[n - 1].close;
+  const atr = ind.atr > 0 ? ind.atr : price * 0.02;
+  if (!(atr > 0)) return null;
+
+  const sw = swingLevels(cs, 3);
+  const resAll = mergeLevels(sw.hi.filter(p => p.price > price * 1.002), n, atr);
+  const supAll = mergeLevels(sw.lo.filter(p => p.price < price * 0.998), n, atr);
+
+  /* مصادر هدف إضافية من البنية — لا من مضاعف */
+  const extras = [];
+  let fr = null;
+  try { fr = ddFrac(sym); } catch (e) { }
+  if (fr && fr.ok) {
+    if (fr.target1 > price) extras.push({ price: fr.target1, src: 'قمة فراكتالية حيّة', weight: 2.4 });
+    if (fr.target2 > price) extras.push({ price: fr.target2, src: 'القمة الفراكتالية التالية', weight: 1.8 });
+    if (fr.measuredMove > price) extras.push({ price: fr.measuredMove, src: 'حركة مقيسة من آخر ساق دافعة', weight: 1.6 });
+  }
+  const hi52 = Math.max(...cs.slice(-252).map(c => c.high));
+  if (hi52 > price * 1.005) extras.push({ price: +hi52.toFixed(2), src: 'قمة النطاق السنوي', weight: 2.2 });
+
+  const targetPool = [
+    ...resAll.map(r => ({ price: r.price, src: `قمة متأرجحة (${r.touches} لمسة، آخرها قبل ${r.barsAgo} جلسة)`, weight: r.weight })),
+    ...extras
+  ].sort((a, b) => a.price - b.price);
+
+  /* ── نمط الدخول (يُحدَّد قبل الوقف: الوقف يُقاس من الدخول لا من السعر) ── */
+  const sup1 = supAll.length ? supAll[supAll.length - 1] : null;   /* أقرب دعم تحت السعر */
+  const nearRes = targetPool.find(t => t.price > price);
+  const roomToRes = nearRes ? (nearRes.price - price) / atr : 99;
+  const buf = +(0.15 * atr).toFixed(2);   /* مسافة الاختراق من ATR لا من نسبة ثابتة */
+
+  let style, entryLo, entryHi, entryWhy, breakLevel = null;
+  if (roomToRes < 0.8 && nearRes) {
+    style = 'breakout'; breakLevel = nearRes.price;
+    entryLo = +(nearRes.price + buf).toFixed(2);
+    entryHi = +(nearRes.price + buf + 0.45 * atr).toFixed(2);
+    entryWhy = `السعر يبعد ${roomToRes.toFixed(1)}×ATR فقط عن ${nearRes.price} — الشراء تحت جدار أوامر بيع خسارة متوقعة. الدخول فوقه بـ${buf}$ (0.15×ATR).`;
+  } else if (sup1 && (price - sup1.price) / atr <= 0.9) {
+    style = 'bounce';
+    entryLo = +(sup1.price).toFixed(2);
+    entryHi = +(sup1.price + 0.6 * atr).toFixed(2);
+    entryWhy = `السعر عند دعم ${sup1.price} (${sup1.touches} لمسة) — الدخول في نطاقه، والوقف تحته مباشرة يجعل المخاطرة صغيرة ومعرّفة.`;
+  } else {
+    style = 'pullback';
+    const back = +(price - 0.55 * atr).toFixed(2);
+    entryLo = sup1 ? Math.max(+(sup1.price + 0.1 * atr).toFixed(2), back) : back;
+    entryHi = +(price + 0.1 * atr).toFixed(2);
+    if (entryLo >= entryHi) entryLo = +(entryHi - 0.4 * atr).toFixed(2);
+    entryWhy = `لا مقاومة قريبة ولا دعم ملاصق — الدخول في نطاق حول السعر الحالي، ويُفضّل النصف الأدنى منه.`;
+  }
+  const entry = +((entryLo + entryHi) / 2).toFixed(2);
+
+  /* ── الوقف: يُقاس من **سعر الدخول** لا من السعر الحالي ──
+     🛠️ كان يُحسب من السعر الحالي حتى في دخول الاختراق، فيخرج وقف يبعد
+     2.4×ATR عن دخول لم يقع بعد. على SPY أعطى مخاطرة 2.83$ لهدف على بعد
+     1.78$ — أي عائد 0.63R يُعرض كأنه خطة. الوقف الآن مشتقّ من الدخول،
+     ومحصور في نطاق قابل للإدارة [0.7 – 2.5]×ATR. */
+  const supBelowEntry = supAll.filter(l => l.price < entryLo * 0.999);
+  const sBase = supBelowEntry.length ? supBelowEntry[supBelowEntry.length - 1] : null;
+  let stop, stopSrc;
+  const structStop = sBase ? +(sBase.price - 0.35 * atr).toFixed(2) : null;
+  const structRisk = structStop != null ? entry - structStop : null;
+
+  if (style === 'breakout' && breakLevel != null) {
+    /* في الاختراق: الوقف تحت المستوى المكسور — إن عاد تحته فالاختراق كاذب */
+    const back = +(breakLevel - 0.6 * atr).toFixed(2);
+    stop = back; stopSrc = `تحت المستوى المكسور ${breakLevel} بـ0.6×ATR — العودة تحته تُبطل سبب الدخول`;
+    if (structStop != null && structStop > back && (entry - structStop) >= 0.7 * atr) {
+      stop = structStop; stopSrc = `تحت دعم ${sBase.price} (${sBase.touches} لمسة) بهامش 0.35×ATR`;
+    }
+  } else if (structStop != null && structRisk >= 0.7 * atr && structRisk <= 2.5 * atr) {
+    stop = structStop; stopSrc = `تحت دعم ${sBase.price} (${sBase.touches} لمسة) بهامش 0.35×ATR`;
+  } else {
+    stop = +(entry - 1.6 * atr).toFixed(2);
+    stopSrc = structStop != null
+      ? `مسافة 1.6×ATR من الدخول (أقرب دعم ${sBase.price} يعطي مخاطرة ${(structRisk / atr).toFixed(1)}×ATR — خارج النطاق القابل للإدارة)`
+      : `مسافة 1.6×ATR من الدخول (لا يوجد دعم بنيوي تحت نطاق الدخول)`;
+  }
+  if (!(stop > 0) || stop >= entryLo) return null;
+
+  const risk = +(entry - stop).toFixed(2);
+  if (!(risk > 0)) return null;
+  const minRR = opts.minRR ?? 1.8;
+
+  /* ── الأهداف والعوائق ──
+     🛠️ الفصل الذي لم يكن موجوداً. المستوى الذي يبعد 0.6R عن الدخول ليس
+     هدفاً — هو **عائق** في الطريق: مكان يُتوقع عنده بيع يبطئ الحركة.
+     عرضه في خانة «الهدف» يُنتج عائداً وهمياً ثم يُرفض القرار عند بوابة
+     العائد، وهذا كان أحد سببَي «القرارات قليلة».
+     الهدف الأول الآن = أول مستوى بنيوي يعطي minRR فعلاً، وما دونه
+     يُعرض بوضوح تحت اسم «عوائق». */
+  const above = targetPool
+    .filter(t => t.price > entry * 1.001)
+    .filter((t, i, a) => i === 0 || t.price - a[i - 1].price > atr * 0.7);
+
+  const obstacles = [], picked = [];
+  for (const t of above) {
+    const rr = +((t.price - entry) / risk).toFixed(2);
+    const row = { price: +t.price.toFixed(2), src: t.src, structural: true, weight: t.weight, rr };
+    if (!picked.length && rr < minRR) obstacles.push(row);
+    else { picked.push(row); if (picked.length >= 3) break; }
+  }
+  while (picked.length < 3) {
+    const mult = picked.length === 0 ? Math.max(2, Math.ceil(minRR)) : (picked.length + 2);
+    const px = +(entry + risk * mult).toFixed(2);
+    if (picked.length && px <= picked[picked.length - 1].price) break;
+    picked.push({ price: px, src: `امتداد ${mult}R — لا يوجد مستوى بنيوي هنا`, structural: false, weight: 0, rr: mult });
+  }
+
+  const targets = picked;
+  const t1 = targets[0];
+
+  /* ── سقف المطاردة: أعلى سعر يبقى العائد عنده ≥ minRR ──
+     بحلّ  (t1 − x) / (x − stop) = minRR  على x.
+     وبما أن الهدف الأول اختير ليعطي minRR عند الدخول، فالسقف لا يقع
+     تحت الدخول أبداً — وكان يقع تحته في النسخة السابقة لأن الهدف
+     كان يُختار بالمسافة لا بالعائد. */
+  const chaseCap = t1 ? +((t1.price + minRR * stop) / (1 + minRR)).toFixed(2) : null;
+
+  return {
+    sym, style, price, atr: +atr.toFixed(2),
+    entry, entryLo, entryHi, entryWhy,
+    stop, stopSrc, risk, riskPct: +(risk / entry * 100).toFixed(2),
+    targets, obstacles, minRR, rr1: t1 ? t1.rr : null,
+    chaseCap,
+    chaseNote: chaseCap
+      ? (price > chaseCap
+        ? `⚠️ السعر الحالي ${price.toFixed(2)} فوق سقف المطاردة ${chaseCap} — الدخول الآن يعطي عائداً دون ${minRR}R. انتظر ارتداداً أو اترك السهم.`
+        : `لا تشترِ فوق ${chaseCap}$ — عنده يهبط العائد دون ${minRR}R مهما بدا السهم قوياً.`)
+      : null,
+    supports: supAll.slice(-3).reverse(),
+    resistances: resAll.slice(0, 3),
+    structuralTargets: targets.filter(t => t.structural).length,
+    obstacleNote: obstacles.length >= 2
+      ? `⚠️ ${obstacles.length} مستويات بيع بين الدخول والهدف الأول (${obstacles.map(o => o.price).join(' · ')}) — الطريق مزدحم، والحركة ستتوقف عند كل منها.`
+      : obstacles.length === 1
+        ? `مستوى بيع واحد في الطريق عند ${obstacles[0].price} (${obstacles[0].rr}R) — يُتوقع تباطؤ عنده لا انعكاس.`
+        : 'لا مستوى بيع بين الدخول والهدف الأول — طريق نظيف.'
+  };
+}
+
+window.buildEntryPlan = buildEntryPlan;
+window.swingLevels = swingLevels;
 
 /* ══════════════════════════════════════════════════════════════════════
    🗓️ تقويم التداول الأمريكي — غلاف واحد لكل تحويل «جلسات ← تاريخ»
@@ -7927,25 +8342,38 @@ function timeActivationCard(sym, compact) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════
-   📡 رادار الحركة المتوقعة — أُعيد بناؤه
+   📡 رادار الحركة المتوقعة — النسخة الثالثة، أُعيدت من الصفر
    ──────────────────────────────────────────────────────────────────────
-   سبب فراغه سابقاً لم يكن قلة الفرص، بل ثلاثة قيود تُفرغه حتماً:
-     • يُحسب داخل المسح الشامل فيثقله ويُهمَل؛
-     • لا يُبقي إلا سهماً نافذته خلال يومين تقويميين؛
-     • ومصدره الوحيد نوافذ غان/فيبوناتشي — أرقام مفروضة من خارج السهم.
+   لماذا كان فارغاً دائماً؟ ليس بسبب منطق الرادار، بل بسبب البيانات:
+   المسح كان يحمّل 63 جلسة، وكل مصادر التوقيت مغلقة عند هذا العمق
+   (الطيف بلا قوة إحصائية، والتماسك خارج العيّنة يحتاج 180 جلسة،
+   والدورات التجريبية تحتاج 10 ارتكازات مؤكدة). فكان الرادار يسأل سؤالاً
+   لا تملك البيانات جوابه، ثم يعرض جدولاً فارغاً بلا أن يقول لماذا.
 
-   الآن: المصدر الأول الدورة الطيفية المقاسة على السهم نفسه بنطاق عدم
-   يقين معلن، والنافذة الكلاسيكية نزلت إلى مرتبة احتياطية موسومة صراحةً
-   بضعفها. وعمود «التحقق» يفصل ما لم يكن مفصولاً: دورة دالة إحصائياً
-   شيء، ودورة أثبتت إصابتها على بيانات لم ترها شيء آخر.
+   ثلاث قواعد تحكم هذه النسخة:
+
+   ① **لا يكذب بالصمت.** إن كان العمق التاريخي غير كافٍ يقول ذلك بالرقم
+      ويعرض زر إصلاح، بدل جدول فارغ يُفهم على أنه «لا فرص».
+
+   ② **مرّتان لا مرّة.** المرور الأول طيفي فقط (3–18 مللي ثانية للسهم)
+      على كل الأسهم. والاختبارات الثقيلة — التماسك خارج العيّنة ودورات
+      الارتكاز التجريبية — تُشغَّل فقط على المرشّحين الذين لهم انعطاف
+      داخل الأفق. الفرق: 8 ثوانٍ بدل 20، وعمود «التحقق» يصير محسوباً
+      فعلاً بدل أن يكون تخميناً.
+
+   ③ **لا يجمّد الواجهة ولا يمنع الإلغاء.** يتنفّس كل دفعة، وله زر إيقاف.
    ══════════════════════════════════════════════════════════════════════ */
 
-const RADAR = { rows: [], ran: false, busy: false, horizon: 10, strict: false, showClassic: true };
+const RADAR = {
+  rows: [], ran: false, busy: false, cancel: false,
+  horizon: 10, strict: false, showClassic: true,
+  scanned: 0, eligible: 0, skippedShort: 0, phase: ''
+};
 
 function radarSetHorizon(h, el) {
   RADAR.horizon = h;
   document.querySelectorAll('.rdr-h').forEach(b => {
-    const on = b === el;
+    const on = b === el || (+b.dataset.h === h && !el);
     b.classList.toggle('on', on);
     b.style.background = on ? 'rgba(255,107,53,.18)' : 'transparent';
     b.style.color = on ? '#ff6b35' : 'var(--t2)';
@@ -7968,125 +8396,270 @@ function radarToggleClassic(el) {
   radarRenderTable();
 }
 
+function radarStop() { RADAR.cancel = true; }
+
+function _radarProg(txt) {
+  const el = document.getElementById('rdr-prog');
+  if (el) el.innerHTML = txt;
+}
+
 /** ترتيب بالمصدر الأقوى ثم بالقرب — لا العكس. */
 function _radarRank(r) {
   const base = r.source === 'spectral' ? (r.validated ? 300 : 200)
-    : r.source === 'empirical' ? 150 : 50;
+    : r.source === 'empirical' ? 150 : 40;
   const prox = 12 * (1 - Math.min(1, r.barsAhead / Math.max(1, RADAR.horizon)));
   return base + prox - (r.usable ? 0 : 25);
 }
 
+/** المستوى الذي يُراقَب عنده: أقرب دعم إن كان الانعطاف قاعاً، وأقرب
+ *  مقاومة إن كان قمة — من البنية السعرية لا من المتوسطات. */
+function _radarWatch(sym, isValley) {
+  try {
+    const cs = G.cans[sym];
+    if (!cs || cs.length < 40) return null;
+    const price = cs[cs.length - 1].close;
+    const ind = G.ind[sym] || {};
+    const atr = ind.atr > 0 ? ind.atr : price * 0.02;
+    const sw = swingLevels(cs, 3);
+    const pool = isValley
+      ? mergeLevels(sw.lo.filter(p => p.price < price * 0.998), cs.length, atr)
+      : mergeLevels(sw.hi.filter(p => p.price > price * 1.002), cs.length, atr);
+    if (!pool.length) return null;
+    const lv = isValley ? pool[pool.length - 1] : pool[0];
+    return {
+      price: lv.price, touches: lv.touches,
+      label: isValley ? 'أقرب دعم' : 'أقرب مقاومة',
+      distPct: +((lv.price - price) / price * 100).toFixed(2)
+    };
+  } catch (e) { return null; }
+}
+
 async function radarCompute(force) {
   if (RADAR.busy) return;
-  const prog = document.getElementById('rdr-prog');
+  RADAR.busy = true; RADAR.cancel = false;
+
   const syms = _advData.length
     ? _advData.map(d => d.sym)
-    : Object.keys(G.cans || {}).filter(s => (G.cans[s] || []).length >= 80);
+    : Object.keys(G.cans || {});
 
   if (!syms.length) {
-    if (prog) prog.textContent = '⚠️ شغّل «🔬 مسح شامل» أولاً — الرادار يقرأ الأسهم المحمّلة.';
-    RADAR.ran = true; RADAR.rows = []; radarRenderTable();
-    return;
+    RADAR.busy = false; RADAR.ran = true; RADAR.rows = [];
+    _radarProg('⚠️ لا توجد أسهم محمّلة — شغّل «🔬 مسح شامل» أولاً.');
+    radarRenderTable(); return;
   }
-  if (force) _taCache = {};
+  if (force) { _taCache = {}; _ddTimeCache = {}; }
 
-  RADAR.busy = true;
-  const rows = [];
-  for (let i = 0; i < syms.length; i++) {
-    const s = syms[i];
-    if (prog && i % 8 === 0) prog.textContent = `يقيس الدورات… ${i + 1}/${syms.length}`;
-    try {
-      const a = timeActivation(s);
-      if (a && a.primary) {
-        const p = a.primary;
-        rows.push({
-          sym: s, name: NAMES[s] || s, price: G.pr[s] || 0, pct: G.pc[s] || 0,
-          type: p.type, isValley: p.isValley, barsAhead: p.barsAhead,
-          loBars: p.loBars, hiBars: p.hiBars, sdBars: p.sdBars,
-          source: p.source, sourceLabel: p.sourceLabel,
-          validated: p.validated, usable: p.usable, period: p.period,
-          dateText: p.dateText, watch: a.watch, headline: a.headline
-        });
-      }
-    } catch (e) { }
-    if (i % 12 === 11) await new Promise(r => setTimeout(r, 0)); /* لا يجمّد الواجهة */
+  /* ── فحص مسبق: هل العمق التاريخي يسمح بالسؤال أصلاً؟ ── */
+  const MIN_SPECTRAL = 120, MIN_COH = 180;
+  const depths = syms.map(s => (G.cans[s] || []).length);
+  const deepEnough = depths.filter(d => d >= MIN_SPECTRAL).length;
+  RADAR.skippedShort = syms.length - deepEnough;
+  RADAR.scanned = syms.length;
+
+  if (deepEnough === 0) {
+    RADAR.busy = false; RADAR.ran = true; RADAR.rows = [];
+    RADAR.phase = 'short';
+    radarRenderTable(); return;
   }
+
+  /* ══ المرور الأول: طيفي فقط، سريع، على الجميع ══ */
+  const cands = [];
+  for (let i = 0; i < syms.length; i++) {
+    if (RADAR.cancel) break;
+    const s = syms[i];
+    if (i % 10 === 0) {
+      _radarProg(`المرور الأول (طيفي) — ${i + 1}/${syms.length} · <span style="color:#22d3ee">${cands.length} مرشّح</span>`);
+      await new Promise(r => setTimeout(r, 0));
+    }
+    const cs = G.cans[s];
+    if (!cs || cs.length < MIN_SPECTRAL) continue;
+    if (G.demo.has(s)) continue;
+    try {
+      const sp = KSAEngine.spectralPro(cs.map(c => c.close), { alpha: 0.05 });
+      if (!sp.ok || !sp.significant) continue;
+      const turns = KSAEngine.projectTurnsPro(sp, 60) || [];
+      const nx = turns.find(t => t.barsAhead >= 0 && t.barsAhead <= 45);
+      if (!nx) continue;
+      cands.push({ sym: s, cs, sp, turn: nx });
+    } catch (e) { }
+  }
+
+  /* ══ المرور الثاني: التحقق الثقيل على المرشّحين وحدهم ══ */
+  const rows = [];
+  for (let i = 0; i < cands.length; i++) {
+    if (RADAR.cancel) break;
+    const c = cands[i];
+    if (i % 4 === 0) {
+      _radarProg(`المرور الثاني (تحقق خارج العيّنة) — ${i + 1}/${cands.length} مرشّح`);
+      await new Promise(r => setTimeout(r, 0));
+    }
+    let coh = null;
+    if (c.cs.length >= MIN_COH) {
+      try { coh = KSAEngine.cycleCoherence(c.cs); } catch (e) { }
+    }
+    const validated = !!(coh && coh.ok && coh.reliable);
+    const isValley = c.turn.type === 'valley';
+    rows.push({
+      sym: c.sym, name: NAMES[c.sym] || c.sym,
+      price: G.pr[c.sym] || c.cs[c.cs.length - 1].close, pct: G.pc[c.sym] || 0,
+      source: 'spectral', type: c.turn.type, isValley,
+      barsAhead: c.turn.barsAhead, loBars: c.turn.loBars, hiBars: c.turn.hiBars,
+      sdBars: c.turn.sdBars, usable: c.turn.usable !== false,
+      period: c.sp.period, cyclePos: c.sp.cyclePosPct, pText: c.sp.pValueText, snr: c.sp.snr,
+      validated,
+      cohText: coh && coh.ok
+        ? `${coh.hitRatePct}٪ إصابة مقابل ${coh.chanceRatePct}٪ بالصدفة · p=${coh.pValueText}`
+        : (coh ? coh.reason : `يتطلب ${MIN_COH} جلسة (متوفر ${c.cs.length})`),
+      bars: c.cs.length,
+      watch: _radarWatch(c.sym, isValley),
+      date: usFmtDate(usAddTradingDays(c.turn.barsAhead))
+    });
+  }
+
+  /* ══ الاحتياطي الكلاسيكي — لأسهم بلا دورة طيفية دالة ══ */
+  if (!RADAR.cancel) {
+    const have = new Set(rows.map(r => r.sym));
+    const pool = syms.filter(s => !have.has(s) && (G.cans[s] || []).length >= 80 && !G.demo.has(s));
+    for (let i = 0; i < pool.length; i++) {
+      if (RADAR.cancel) break;
+      if (i % 10 === 0) {
+        _radarProg(`الاحتياطي الكلاسيكي — ${i + 1}/${pool.length}`);
+        await new Promise(r => setTimeout(r, 0));
+      }
+      const s = pool[i], cs = G.cans[s];
+      try {
+        const pv = KSAEngine.lastConfirmedPivot(cs, 3);
+        if (!pv) continue;
+        const ws = KSAEngine.timeWindows(cs, { i: pv.i, price: pv.price, type: pv.type }, { horizonDays: 120 }) || [];
+        const w = ws.find(x => x.barsAhead >= 0 && x.barsAhead <= 45);
+        if (!w) continue;
+        const isValley = pv.type === 'H';
+        rows.push({
+          sym: s, name: NAMES[s] || s, price: G.pr[s] || cs[cs.length - 1].close, pct: G.pc[s] || 0,
+          source: 'classic', type: isValley ? 'valley' : 'peak', isValley,
+          barsAhead: w.barsAhead, loBars: w.barsAhead, hiBars: w.barsAhead,
+          sdBars: null, usable: false, period: null, validated: false,
+          label: w.label,
+          cohText: 'رقم مفروض من خارج السهم — لم يُختبر عليه',
+          bars: cs.length, watch: _radarWatch(s, isValley),
+          date: usFmtDate(usAddTradingDays(w.barsAhead))
+        });
+      } catch (e) { }
+    }
+  }
+
   rows.forEach(r => { r.rank = _radarRank(r); });
   rows.sort((a, b) => b.rank - a.rank);
   RADAR.rows = rows;
+  RADAR.eligible = deepEnough;
   RADAR.ran = true;
   RADAR.busy = false;
-  if (prog) prog.textContent = `اكتمل — قِيست دورات ${syms.length} سهماً · ${new Date().toLocaleTimeString('ar-EG')}`;
+  RADAR.phase = RADAR.cancel ? 'cancelled' : 'done';
+
+  const nSpec = rows.filter(r => r.source === 'spectral').length;
+  const nVal = rows.filter(r => r.validated).length;
+  _radarProg(
+    `${RADAR.cancel ? '⏹ أُوقف — ' : '✓ '}فُحص ${deepEnough} سهماً بعمق كافٍ` +
+    (RADAR.skippedShort ? ` · <span style="color:#f5c842">${RADAR.skippedShort} تُخطّي لقصر تاريخه</span>` : '') +
+    ` · <b style="color:#22d3ee">${nSpec}</b> بدورة طيفية دالة · <b style="color:#0ecf7e">${nVal}</b> مؤكَّدة خارج العيّنة`
+  );
   radarRenderTable();
 }
 
 function radarRenderTable() {
   const body = document.getElementById('rtbody');
   if (!body) return;
+  const COLS = 10;
 
   if (!RADAR.ran) {
-    body.innerHTML = `<tr><td colspan="10" style="padding:26px;text-align:center;color:var(--t3);line-height:2">
-      ${RADAR.busy ? 'يقيس الدورات على كل سهم…' : 'اضغط «📡 احسب الرادار» أعلاه.'}<br>
+    body.innerHTML = `<tr><td colspan="${COLS}" style="padding:26px;text-align:center;color:var(--t3);line-height:2">
+      ${RADAR.busy ? 'يقيس الدورات…' : 'اضغط «📡 احسب الرادار» أعلاه.'}<br>
       <span style="font-size:11px">يُحسب عند فتح التبويب لا داخل المسح الشامل، فلا يبطّئه.</span>
     </td></tr>`;
     _visibleSyms = []; return;
   }
 
+  /* ── عمق تاريخي غير كافٍ: تشخيص صريح لا جدول فارغ ── */
+  if (RADAR.phase === 'short') {
+    body.innerHTML = `<tr><td colspan="${COLS}" style="padding:22px;text-align:right;line-height:2">
+      <div style="max-width:640px;margin:0 auto">
+        <div style="color:#f5c842;font-weight:800;font-size:15px;margin-bottom:10px">⚠️ العمق التاريخي غير كافٍ — والرادار لا يخمّن</div>
+        <div style="color:#c8d0e0;font-size:12.5px;line-height:1.95">
+          لا سهم من الـ${RADAR.scanned} المحمّلة يملك 120 جلسة على الأقل.
+          وقياس دورة تمتد عشرين جلسة من تاريخ أقصر من ذلك يعطي رقماً، لكنه رقم بلا قوة إحصائية:
+          قِيس على سلسلة فيها دورة 21 جلسة حقيقية أن قيمة الاحتمال تخرج <b>0.55</b> عند 63 جلسة،
+          و<b>أقل من 0.001</b> عند 252 جلسة. نفس السلسلة، ونفس الدورة، والفارق هو العيّنة وحدها.
+          <br><br>
+          <b>الحل:</b> اضغط «🔬 مسح شامل» مرة واحدة — المسح الآن يحمّل سنة كاملة (${HIST.range})
+          بدل ثلاثة أشهر، وهو ما تحتاجه كل اختبارات التوقيت.
+        </div>
+        <button onclick="runFullScan()" style="margin-top:14px;background:rgba(255,107,53,.16);border:1px solid rgba(255,107,53,.45);color:#ff6b35;padding:8px 18px;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">🔬 شغّل المسح الشامل الآن</button>
+      </div>
+    </td></tr>`;
+    _visibleSyms = []; return;
+  }
+
   let rows = RADAR.rows.filter(r => r.barsAhead <= RADAR.horizon);
-  if (RADAR.strict) rows = rows.filter(r => r.source === 'spectral' && r.validated);
+  if (RADAR.strict) rows = rows.filter(r => r.validated);
   if (!RADAR.showClassic) rows = rows.filter(r => r.source !== 'classic');
 
-  const fbRadar = document.getElementById('fb-radar');
-  if (fbRadar) fbRadar.textContent = rows.length;
+  const fb = document.getElementById('fb-radar');
+  if (fb) fb.textContent = rows.length;
 
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="10" style="padding:24px;text-align:center;color:var(--t3);line-height:2">
-      لا سهم له انعطاف مقاس داخل أفق ${RADAR.horizon} جلسة${RADAR.strict ? ' بدورة مؤكَّدة خارج العيّنة' : ''}.<br>
-      <span style="color:#9aa4b8;font-size:11.5px;line-height:1.9">
-        وهذه <b>نتيجة صحيحة لا عطل</b>: أغلب الأسهم لا تتحرك بدورات قابلة للقياس.<br>
-        وسّع الأفق، أو ألغِ «الدورات المؤكدة خارج العيّنة فقط» — والشريط سيقول لك الحقيقة بدل أن يملأ الشاشة بتواريخ مخترعة.
-      </span></td></tr>`;
+    const inH = RADAR.rows.filter(r => r.barsAhead <= RADAR.horizon).length;
+    const total = RADAR.rows.length;
+    body.innerHTML = `<tr><td colspan="${COLS}" style="padding:22px;text-align:right;line-height:2">
+      <div style="max-width:640px;margin:0 auto">
+        <div style="color:#9aa4b8;font-weight:800;font-size:14px;margin-bottom:9px">لا سهم يطابق الشروط الحالية — وهذه نتيجة، لا عطل</div>
+        <div style="color:#c8d0e0;font-size:12.5px;line-height:1.95">
+          من ${RADAR.eligible} سهماً بعمق كافٍ: <b>${total}</b> له انعطاف مقاس ضمن 45 جلسة،
+          و<b>${inH}</b> منها داخل أفق ${RADAR.horizon} جلسة${RADAR.strict ? '، ولا واحد منها بدورة مؤكَّدة خارج العيّنة' : ''}.
+          <br><br>
+          أغلب الأسهم لا تتحرك بدورات قابلة للقياس، وهذا هو الوضع الطبيعي لا الاستثناء.
+          ${RADAR.strict ? 'ألغِ «المؤكدة خارج العيّنة فقط» لترى الدورات الدالة إحصائياً وحدها، ' : ''}
+          أو وسّع الأفق. والشريط لن يملأ الشاشة بتواريخ مخترعة ليبدو مشغولاً.
+        </div>
+      </div>
+    </td></tr>`;
     _visibleSyms = []; return;
   }
 
   _visibleSyms = rows.map(r => r.sym);
   if (_focusedIdx >= _visibleSyms.length) _focusedIdx = _visibleSyms.length - 1;
 
-  const srcTag = r => r.source === 'spectral'
-    ? `<span style="color:#22d3ee;font-weight:700" title="مقاسة على السهم نفسه">🔬 دورة طيفية ${r.period}ج</span>`
-    : r.source === 'empirical'
-      ? `<span style="color:#a78bfa;font-weight:700" title="مقاسة على ارتكازات هذا السهم">◉ دورة ارتكاز ${r.period}ج</span>`
-      : `<span style="color:#f5c842" title="رقم غان/فيبوناتشي مفروض من خارج السهم">📐 كلاسيكية (احتياطي ضعيف)</span>`;
-
-  const verifyTag = r => r.source === 'classic'
-    ? '<span style="color:#f5c842">مفروضة من الخارج</span>'
-    : r.validated
-      ? '<span style="color:#0ecf7e;font-weight:700" title="أثبتت إصابتها على بيانات لم ترها">✓✓ مؤكَّدة خارج العيّنة</span>'
-      : '<span style="color:#f5c842" title="دالة إحصائياً لكن لم تُثبت إصابتها خارج العيّنة — وصف للماضي">✓ دالة فقط</span>';
-
   body.innerHTML = rows.map((r, idx) => {
-    const turnCol = r.isValley ? 'var(--up)' : 'var(--dn)';
+    const col = r.isValley ? 'var(--up)' : 'var(--dn)';
     const when = r.barsAhead === 0 ? 'اليوم' : r.barsAhead === 1 ? 'الجلسة القادمة' : `بعد ${r.barsAhead} جلسة`;
     const band = r.loBars !== r.hiBars ? `[${r.loBars} – ${r.hiBars}]` : '—';
+    const src = r.source === 'spectral'
+      ? `<span style="color:#22d3ee;font-weight:700" title="دورة مقاسة على هذا السهم · p=${r.pText} · إشارة/ضجيج ${r.snr} · ${r.bars} جلسة">🔬 دورة ${r.period}ج</span>`
+      : `<span style="color:#f5c842" title="${r.label || ''} — رقم غان/فيبوناتشي مفروض من خارج السهم">📐 كلاسيكية</span>`;
+    const ver = r.source === 'classic'
+      ? '<span style="color:#f5c842" title="لم يثبت أن هذه الأرقام تنطبق على هذا السهم">مفروضة من الخارج</span>'
+      : r.validated
+        ? `<span style="color:#0ecf7e;font-weight:700" title="${r.cohText}">✓✓ مؤكَّدة خارج العيّنة</span>`
+        : `<span style="color:#f5c842" title="${r.cohText}">✓ دالة فقط</span>`;
+
     return `
     <tr data-idx="${idx}" class="${_focusedIdx === idx ? 'kb-focus' : ''}" onclick="selectStock('${r.sym}');setFocusedRow(${idx})"
-        style="cursor:pointer;border-right:3px solid ${r.source === 'classic' ? '#f5c842' : turnCol}">
+        style="cursor:pointer;border-right:3px solid ${r.source === 'classic' ? '#f5c842' : col}">
       <td style="font-weight:700;color:var(--bl);font-family:'IBM Plex Mono',monospace">${r.sym}</td>
-      <td style="max-width:96px;overflow:hidden;text-overflow:ellipsis">${r.name}</td>
+      <td style="max-width:92px;overflow:hidden;text-overflow:ellipsis">${r.name}</td>
       <td style="font-family:monospace">${(+r.price).toFixed(2)}</td>
       <td style="color:${r.pct >= 0 ? 'var(--up)' : 'var(--dn)'};font-family:monospace">${r.pct >= 0 ? '+' : ''}${(+r.pct).toFixed(2)}%</td>
-      <td style="white-space:nowrap"><span style="color:${turnCol};font-weight:700">${r.isValley ? '🟢 قاع' : '🔴 قمة'}</span>
+      <td style="white-space:nowrap"><span style="color:${col};font-weight:700">${r.isValley ? '🟢 قاع' : '🔴 قمة'}</span>
         <span style="color:var(--t2);font-size:calc(var(--base-font)*0.82)"> ${when}</span></td>
       <td style="font-family:monospace;white-space:nowrap" title="${r.usable ? 'أضيق من ربع دورة — قابلة للتنفيذ' : 'أوسع من ربع دورة — للتنبيه لا للتنفيذ'}">
         ${band}${r.sdBars != null ? `<span style="color:var(--t3)"> ±${r.sdBars}</span>` : ''}
-        ${r.usable ? '' : '<span style="color:#f5c842;font-size:calc(var(--base-font)*0.75)"> ⚠ للتنبيه لا للتنفيذ</span>'}</td>
-      <td style="font-size:calc(var(--base-font)*0.82)">${srcTag(r)}</td>
-      <td style="font-size:calc(var(--base-font)*0.8)">${verifyTag(r)}</td>
+        ${r.usable ? '' : '<span style="color:#f5c842;font-size:calc(var(--base-font)*0.72)"> ⚠ للتنبيه</span>'}</td>
+      <td style="font-size:calc(var(--base-font)*0.82)">${src}</td>
+      <td style="font-size:calc(var(--base-font)*0.8)">${ver}</td>
       <td style="font-family:monospace;white-space:nowrap">${r.watch
-        ? `<span style="color:${r.isValley ? 'var(--up)' : 'var(--dn)'}" title="${r.watch.label} — ${r.watch.src}">${r.watch.price}</span>
-           <span style="color:var(--t3);font-size:calc(var(--base-font)*0.75)">${r.watch.distPct > 0 ? '+' : ''}${r.watch.distPct}٪</span>`
+        ? `<span style="color:${col}" title="${r.watch.label} · ${r.watch.touches} لمسة">${r.watch.price}</span>
+           <span style="color:var(--t3);font-size:calc(var(--base-font)*0.72)">${r.watch.distPct > 0 ? '+' : ''}${r.watch.distPct}٪</span>`
         : '<span style="color:var(--t3)">—</span>'}</td>
-      <td style="font-family:monospace;color:var(--t2)">${r.dateText}</td>
+      <td style="font-family:monospace;color:var(--t2)">${r.date}</td>
     </tr>`;
   }).join('');
 }
@@ -8095,6 +8668,7 @@ window.radarCompute = radarCompute;
 window.radarSetHorizon = radarSetHorizon;
 window.radarToggleStrict = radarToggleStrict;
 window.radarToggleClassic = radarToggleClassic;
+window.radarStop = radarStop;
 window.timeActivation = timeActivation;
 window.timeActivationCard = timeActivationCard;
 window.usAddTradingDays = usAddTradingDays;
