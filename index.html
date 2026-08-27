@@ -277,7 +277,6 @@ body{height:100%;background:var(--c0);color:var(--t1);font-family:'IBM Plex Sans
 .ib-empty{padding:30px;text-align:center;color:var(--t3)}.ib-empty-i{font-size:36px;margin-bottom:8px;opacity:.5}
 </style>
 </head>
-</head>
 <body>
 
 <!-- ══ TIME ANALYSIS REPORT MODAL — full-screen readable report,
@@ -366,6 +365,18 @@ body{height:100%;background:var(--c0);color:var(--t1);font-family:'IBM Plex Sans
       <span id="dd-count" style="font-size:10px;color:var(--t2)"></span>
       <span id="dd-regime" style="font-size:10px;color:var(--t2)">اضغط «احسب القرارات» لقياس نظام السوق</span>
       <span id="dd-heat" style="font-size:10px;color:var(--t2);margin-right:auto"></span>
+    </div>
+    <div id="radar-bar" style="display:none;padding:8px 12px;border-bottom:1px solid var(--bd);align-items:center;gap:9px;flex-wrap:wrap;background:linear-gradient(135deg,rgba(255,107,53,.07),rgba(34,211,238,.03))">
+      <button onclick="radarCompute(true)" class="scan-btn" style="background:rgba(255,107,53,.14);border:1px solid rgba(255,107,53,.4);color:#ff6b35;flex-shrink:0">📡 احسب الرادار</button>
+      <span style="font-size:10px;color:var(--t3)">الأفق:</span>
+      <div style="display:flex;gap:0;border:1px solid var(--bd2);border-radius:5px;overflow:hidden;flex-shrink:0">
+        <button class="rdr-h" data-h="5" onclick="radarSetHorizon(5,this)" style="padding:4px 11px;font-size:10px;font-family:inherit;border:none;border-left:1px solid var(--bd2);background:transparent;color:var(--t2);cursor:pointer">٥ جلسات</button>
+        <button class="rdr-h on" data-h="10" onclick="radarSetHorizon(10,this)" style="padding:4px 11px;font-size:10px;font-family:inherit;border:none;border-left:1px solid var(--bd2);background:rgba(255,107,53,.18);color:#ff6b35;cursor:pointer">١٠ جلسات</button>
+        <button class="rdr-h" data-h="20" onclick="radarSetHorizon(20,this)" style="padding:4px 11px;font-size:10px;font-family:inherit;border:none;background:transparent;color:var(--t2);cursor:pointer">٢٠ جلسة</button>
+      </div>
+      <button id="rdr-strict" onclick="radarToggleStrict(this)" class="scan-btn" style="background:transparent;border:1px solid var(--bd2);color:var(--t2);flex-shrink:0" title="لا يُعرض إلا سهم أثبتت دورته إصابتها على بيانات لم ترها (تماسك خارج العيّنة)">🧪 الدورات المؤكدة خارج العيّنة فقط</button>
+      <button id="rdr-classic" onclick="radarToggleClassic(this)" class="scan-btn on" style="background:rgba(154,164,184,.12);border:1px solid var(--bd2);color:var(--t2);flex-shrink:0" title="النوافذ الكلاسيكية (غان/فيبوناتشي) أرقام مفروضة من خارج السهم — تُعرض كاحتياطي موسوم بضعفه">📐 إظهار الاحتياطي الكلاسيكي</button>
+      <span id="rdr-prog" style="font-size:10px;color:var(--t2);margin-right:auto">لم يُحسب بعد — يُحسب عند فتح التبويب فقط، لا داخل المسح الشامل</span>
     </div>
     <div id="spectral-scan-bar" style="display:none;padding:8px 12px;border-bottom:1px solid var(--bd);align-items:center;gap:10px;background:rgba(255,215,0,.04)">
       <button id="spectral-scan-btn" onclick="runSpectralScanAll()" class="scan-btn scan-sec" style="background:rgba(255,215,0,.12)!important;border-color:rgba(255,215,0,.3)!important;color:#FFD700!important;flex-shrink:0">🔄 امسح الآن لكل الأسهم</button>
@@ -462,9 +473,7 @@ body{height:100%;background:var(--c0);color:var(--t1);font-family:'IBM Plex Sans
 
 </div>
 
-<!-- ══════════════════════════════════════════════════
-
-<!-- MARKET BRAIN -->
+<!-- ══════════════════════════════════════════════════ MARKET BRAIN ══ -->
 <div class="ib closed" id="ib">
   <div class="ib-hdr" onclick="toggleIB()">
     <div class="ib-logo">🧠 MARKET BRAIN</div>
@@ -1339,6 +1348,8 @@ function optShowDetail(sym) {
   const nContracts = p.riskPerContractUsd ? Math.max(0, Math.floor(riskUsd / p.riskPerContractUsd)) : null;
 
   box.innerHTML = `
+    ${timeActivationCard(sym, true)}
+
     <div style="${S};border-color:${col}55;background:linear-gradient(135deg,${col}0d,transparent)">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
         <b style="font-size:15px">${sym} ${p.typeLabel} ${optNum(c.strike)}</b>
@@ -2849,8 +2860,11 @@ function calcSupportResistance(cs,ind,cur){
       merged.push({price:+c.price.toFixed(2),weight:c.weight,sources:[c.source]});
     }
   }
-  const supports=merged.filter(m=>m.price<cur).sort((a,b)=>b.price-a.price).slice(0,3);
-  const resistances=merged.filter(m=>m.price>=cur).sort((a,b)=>a.price-b.price).slice(0,3);
+  /* 🛠️ كان شرط المقاومة `>= cur`، فيدخل مستوى مطابق للسعر الحالي تماماً
+     في قائمة المقاومات، فتُحسب "المساحة قبل المقاومة" صفراً ويُخصم من
+     تقييم الدخول بلا سبب. الهامش 0.15٪ يستبعد المستوى الذي السعر عنده. */
+  const supports=merged.filter(m=>m.price<cur*0.9985).sort((a,b)=>b.price-a.price).slice(0,3);
+  const resistances=merged.filter(m=>m.price>cur*1.0015).sort((a,b)=>a.price-b.price).slice(0,3);
   return{supports,resistances};
 }
 
@@ -2911,11 +2925,23 @@ function calcTradePlan(sym){
 
   /* ── targets: nearest resistances first, fill remaining with R-multiples ── */
   const targets=sr.resistances.filter(r=>r.price>entry*1.001).map(r=>({price:r.price,source:r.sources.join(' + '),structural:true}));
-  const rMultiples=[2,3,4];
-  while(targets.length<3){
-    const mult=rMultiples[targets.length]||(targets.length+2);
-    targets.push({price:+(entry+risk*mult).toFixed(2),source:`امتداد ${mult}R`,structural:false});
+  /* 🛠️ ثلاثة عيوب في التعبئة السابقة:
+     (١) كانت تختار المضاعف بحسب عدد الأهداف الموجودة، فإذا وُجد هدف بنيوي
+         عند 5R أُضيف بعده هدف "3R" أقرب منه — فتخرج قائمة نازلة الترتيب:
+         الهدف الثاني تحت الأول.
+     (٢) لم تكن تمنع تكرار مستوى قريب جداً من هدف بنيوي موجود.
+     (٣) لم تحرس ضد risk ≤ 0.
+     الآن: تُضاف مضاعفات R أعلى من آخر هدف فعلاً، ثم تُرتَّب تصاعدياً. */
+  if(risk>0){
+    for(const mult of [1.5,2,3,4,5,6,8]){
+      if(targets.length>=3)break;
+      const px=+(entry+risk*mult).toFixed(2);
+      if(targets.some(t=>Math.abs(t.price-px)/px<0.008))continue;
+      if(targets.length&&px<=targets[targets.length-1].price)continue;
+      targets.push({price:px,source:`امتداد ${mult}R`,structural:false});
+    }
   }
+  targets.sort((a,b)=>a.price-b.price);
   const targetsFinal=targets.slice(0,3).map(t=>({...t,rr:risk>0?+((t.price-entry)/risk).toFixed(1):null}));
 
   return{sym,entry,stop,risk,stopSource,planType,planWhy,
@@ -3126,26 +3152,17 @@ function calcAllFilters(sym,marketROC){
   if(heavyConfirmCount>=3)masterScore+=10;
   masterScore=Math.max(0,Math.min(100,Math.round(masterScore)));
 
-  /* 📡 RADAR — أقرب نافذة زمنية حرجة قادمة لهذا السهم (خلال 0-2 يوم تقويمي
-     تحديداً)، مبنية على نفس محرك الدورات المستخدم بالتحليل الزمني الفردي.
-     محسوبة هنا أثناء المسح الكامل حتى يقدر تبويب "رادار الحركة المتوقعة"
-     يفرز كل السوق دفعة واحدة بدل تكرار الحساب لكل سهم عند الطلب. */
-  let radar=null;
-  if(tat.pivotIdx!=null&&cs.length>=60){
-    const pivotObj={i:tat.pivotIdx,p:tat.pivotPrice,type:tat.pivotType};
-    const dcForRadar=tat.detectedCycle;
-    const upcoming=buildUpcomingTimeWindows(cs,pivotObj,dcForRadar);
-    const nearest=upcoming.length?upcoming[0]:null;
-    if(nearest&&nearest.daysLeft<=2){
-      /* 🛠️ المحرك الجديد يرجع الحقل باسم `date` — وكان الرادار يقرأ
-         `estDate` فينتج "Invalid Date" في عمود التاريخ بتبويب الرادار. */
-      radar={daysLeft:nearest.daysLeft,label:nearest.label,estDate:nearest.date,barsAhead:nearest.barsAhead,
-        dirUp:tat.dirUp,strongSR:tat.strongSR,srReason:tat.srReason,
-        confirmed:tat.priceTimeConvergence?.confirmed||false};
-    }
-  }
+  /* 📡 الرادار لم يعد يُحسب هنا.
+     ──────────────────────────────────────────────────────────────────
+     السبب: الحساب داخل المسح الشامل كان يبطّئ كل مسحة على 238 رمزاً
+     لأجل تبويب واحد قد لا يُفتح أصلاً. والأهم أن المنطق نفسه كان معطوباً:
+       • لا يُبقي إلا سهماً نافذته خلال يومين تقويميين، فيفرغ حتماً؛
+       • ومصدره الوحيد نوافذ غان وفيبوناتشي — أرقام مفروضة من خارج
+         السهم لم يثبت أنها تنطبق عليه.
+     البديل في RADAR أدناه: يُحسب عند فتح تبويبه، ومصدره الأول الدورة
+     الطيفية المقاسة على السهم نفسه بنطاق عدم يقين معلن. */
 
-  return{sym,vz,ma,rs,sq,ab,fg,hidden,pregap,fvgr,ew,harm,hunter,tat,snp,sb,fib618,falseBreak,macdX,instVol,revCandle,sig,cls,score,masterScore,bullAlerts,bearAlerts,radar};
+  return{sym,vz,ma,rs,sq,ab,fg,hidden,pregap,fvgr,ew,harm,hunter,tat,snp,sb,fib618,falseBreak,macdX,instVol,revCandle,sig,cls,score,masterScore,bullAlerts,bearAlerts};
 }
 
 /* ══ SCAN ENGINE ══ */
@@ -3200,8 +3217,8 @@ function updateBadges(){
   const fbFalsebreak=document.getElementById('fb-falsebreak');if(fbFalsebreak)fbFalsebreak.textContent=falseBreakActive;
   const whaleActive=_advData.filter(d=>d.sb?.alert).length;
   const fbWhale=document.getElementById('fb-whale');if(fbWhale)fbWhale.textContent=whaleActive;
-  const radarActive=_advData.filter(d=>!!d.radar).length;
-  const fbRadar=document.getElementById('fb-radar');if(fbRadar)fbRadar.textContent=radarActive;
+  /* شارة الرادار تُحدَّث من RADAR.rows بعد حسابها عند فتح التبويب، لا من المسح */
+  const fbRadar=document.getElementById('fb-radar');if(fbRadar&&!RADAR.ran)fbRadar.textContent='—';
   _updateSpectralBadge();
 }
 
@@ -3212,13 +3229,17 @@ function setFilter(f,el){
   el.classList.add('on');
   if(f==='master'){_sortCol='master';_sortDir=-1;}/* always rank strongest-first when entering the unified tab */
   if(f==='whale'){_sortCol='sb_s';_sortDir=-1;}
-  if(f==='radar'){_sortCol='radar_d';_sortDir=-1;}/* الأقرب زمنياً (اليوم/غداً) أولاً */
+  if(f==='radar'){_sortCol='radar_rank';_sortDir=-1;}/* بالمصدر الأقوى لا بالأقرب تاريخاً */
   if(f==='spectral'){_sortCol='spectral_edge';_sortDir=-1;}
   const ddBar=document.getElementById('dd-bar');
   if(ddBar)ddBar.style.display=(f==='decision')?'flex':'none';
   if(f==='decision'){_sortCol='dd';_sortDir=-1;if(!DD.ran&&_advData.length)ddRun();}
   const scanBar=document.getElementById('spectral-scan-bar');
   if(scanBar)scanBar.style.display=(f==='spectral')?'flex':'none';
+  const radarBar=document.getElementById('radar-bar');
+  if(radarBar)radarBar.style.display=(f==='radar')?'flex':'none';
+  /* الرادار يُحسب عند فتح تبويبه لا داخل المسح الشامل، فلا يبطّئه */
+  if(f==='radar'&&!RADAR.ran&&!RADAR.busy){renderResults();radarCompute(false);return;}
   if(f==='options'){renderOptionsTab();return;}
   if(typeof optLeaveTab==='function')optLeaveTab();
   renderResults();
@@ -3328,7 +3349,7 @@ function getHeaders(){
     harmonic:`${base}<th>النموذج</th><th>اكتمال</th><th>الإشارة</th>${end}`,
     hunter:`${base}<th>درجة</th><th>إنذارات</th><th>الحالة</th>${end}`,
     time:`${base}<th onclick="sortResults('time_d')">المسافة الزمنية</th><th>الدورة المطابقة</th><th>الحالة</th><th title="عدد الأدلة الزمنية المستقلة المتوافقة (غان شموع/غان تقويمي/فيبوناتشي/دورة السهم/مربع غان)">قوة التوافق</th>${end}`,
-    radar:`${base}<th onclick="sortResults('radar_d')">التوقع الزمني</th><th>الاتجاه المرجّح</th><th>الدعم/المقاومة</th><th>تقاطع سعر-زمن</th>${end}`,
+    radar:`${base}<th title="نوع الانعطاف المتوقع وبُعده بالجلسات">الانعطاف المتوقع</th><th title="نطاق عدم اليقين المقاس — لا تاريخ واحد">النافذة العملية</th><th title="من أين جاء التاريخ: دورة مقاسة على السهم أم رقم مفروض من خارجه">المصدر</th><th title="دورة دالة إحصائياً شيء، ودورة أثبتت إصابتها على بيانات لم ترها شيء آخر">التحقق</th><th title="أقرب دعم إن كان الانعطاف قاعاً، وأقرب مقاومة إن كان قمة">مستوى المراقبة</th><th>التاريخ التقديري</th>`,
     sniper:`${base}<th onclick="sortResults('snp')">Sniper Score</th><th>المتوافقة</th><th>الحالة</th>${end}`,
     fib618:`${base}<th onclick="sortResults('fib_s')">مستوى فيبوناتشي</th><th>المسافة</th><th>الحالة</th>${end}`,
     falsebreak:`${base}<th onclick="sortResults('fb_s')">المستوى المكسور</th><th>النوع</th><th>الحالة</th>${end}`,
@@ -3354,6 +3375,7 @@ function renderResults(){
   /* 🧭 غرفة القرار — مسار بيانات مستقل (DD.results) مبني فوق _advData
      لكن بشكل مختلف تماماً: صفوفه قرارات لا قياسات. */
   if(_filter==='decision'){ddRenderTable2();return;}
+  if(_filter==='radar'){radarRenderTable();return;}
 
   if(_filter==='spectral'){
     let sdata=[..._spectralResults];
@@ -3402,7 +3424,6 @@ function renderResults(){
          don't show up under tabs that are meant to flag upside opportunities.
          Toggle _showBearish to see the bearish/rejected side instead. */
       if(_filter==='time')return d.tat.active&&(_showBearish?!d.tat.dirUp:d.tat.dirUp);
-      if(_filter==='radar')return !!d.radar;
       if(_filter==='sniper')return d.snp.level!=='low'&&(_showBearish?!d.snp.dirUp:d.snp.dirUp);
       if(_filter==='fib618')return _showBearish?false:(d.fib618.confirmed||d.fib618.inZone);
       if(_filter==='falsebreak')return d.falseBreak.active&&(_showBearish?d.falseBreak.bearish:d.falseBreak.bullish);
@@ -3432,7 +3453,6 @@ function renderResults(){
       case'ab_s':av=a.ab.score;bv=b.ab.score;break;
       case'fg_c':av=a.fg.count;bv=b.fg.count;break;
       case'time_d':av=a.tat.timeBonus;bv=b.tat.timeBonus;break;
-      case'radar_d':av=a.radar?-a.radar.daysLeft:-999;bv=b.radar?-b.radar.daysLeft:-999;break;/* الأقرب زمنياً أولاً (قيمة أعلى = أقرب) */
       case'snp':av=a.snp.composite;bv=b.snp.composite;break;
       case'fib_s':av=a.fib618.score;bv=b.fib618.score;break;
       case'master':av=a.masterScore;bv=b.masterScore;break;
@@ -3466,12 +3486,6 @@ function renderResults(){
       const strengthColor=d.tat.strength==='قوي'?'var(--up)':d.tat.strength==='متوسط'?'var(--gd)':d.tat.strength==='ضعيف'?'var(--t3)':'var(--t3)';
       const strengthCell=`<span style="font-weight:700;color:${strengthColor}" title="${d.tat.evidenceCount||0} من 5 أدلة زمنية متوافقة (غان شموع/غان تقويمي/فيبوناتشي/دورة السهم/مربع غان)">${d.tat.strength||'—'}</span>`;
       midCols=`<td style="font-family:monospace;font-weight:600">${d.tat.candleDistance} شمعة${d.tat.calendarDays!=null?` (${d.tat.calendarDays}ي)`:''}</td><td>${d.tat.cycleNum?tag(tatCol,`${d.tat.cycleType} ${d.tat.cycleNum}`):tag('na','—')}</td><td>${d.tat.badge?tag(tatCol,d.tat.badge):tag('na','محايد')}</td><td>${strengthCell}</td>`;
-    }else if(_filter==='radar'){
-      const r=d.radar;
-      const daysLabel=r.daysLeft===0?'اليوم':r.daysLeft===1?'غداً':`بعد ${r.daysLeft} يوم`;
-      const radarCol=r.dirUp?'s4':'s1';
-      const timingCell=`<span style="font-weight:700;color:${r.daysLeft===0?'var(--up)':'var(--gd)'}" title="${r.label} — ${r.estDate.toLocaleDateString('ar-EG')}">${daysLabel}</span>`;
-      midCols=`<td style="font-family:monospace">${timingCell}</td><td>${tag(radarCol,r.dirUp?'▲ صعودي':'▼ هبوطي')}</td><td>${r.strongSR?tag('na',r.srReason):tag('na','بدون دعم واضح')}</td><td>${r.confirmed?tag('s4','✅ مؤكد'):tag('na','غير مؤكد')}</td>`;
     }else if(_filter==='sniper'){
       const snpCol=d.snp.confluenceMax?'pu':d.snp.level==='high'?(d.snp.dirUp?'s4':'s1'):d.snp.level==='medium'?'s3':'na';
       midCols=`<td style="font-family:monospace;font-weight:700;color:${d.snp.composite>=60?'var(--up)':d.snp.composite>=35?'var(--gd)':'var(--t2)'}">${d.snp.composite}</td><td>${tag(snpCol,`${d.snp.firedCount}/4`)}</td><td>${d.snp.badge?tag(snpCol,d.snp.badge):tag('na','—')}</td>`;
@@ -5163,6 +5177,8 @@ function smartPredictionAdvanced() {
       </div>`).join('');
 
     const html = `
+      ${timeActivationCard(symbol)}
+
       ${audit.ok ? '' : `<div style="${SEC}border-color:rgba(245,200,66,.35);background:rgba(245,200,66,.05)">
         <div style="color:#f5c842;font-weight:800;margin-bottom:6px">⚠️ ملاحظات على جودة البيانات</div>
         <div style="font-size:12px;color:#c8d0e0">${audit.issues.join(' · ')}</div></div>`}
@@ -5265,7 +5281,10 @@ function smartPricingAdvanced() {
     const vb = calculateValueBand(candles);
     if (!vb.ok) { alert('❌ ' + vb.reason); return; }
     const vol = KSAEngine.volatility(candles.map(c => c.close));
-    const limits = KSAEngine.SaudiMarket.dailyLimits(price);
+    /* 🛠️ حُذف استدعاء حدود السوق السعودية (±١٠٪). هذه منصة للسوق
+       الأمريكي، ولا يوجد فيه حدّ تذبذب يومي على السهم إطلاقاً — كان
+       التقرير يعرض "أعلى/أدنى سعر ممكن غداً" وهو سقف لا وجود له،
+       فيوهم المستخدم بحدّ للخسارة أو للربح ليس موجوداً. */
     const a = KSAEngine.atr(candles, 14);
 
     const SEC = 'background:#151b2b;border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:14px 16px;margin-bottom:14px;';
@@ -5305,8 +5324,12 @@ function smartPricingAdvanced() {
         <div style="${ROW}">المدى اليومي المتوقع بثقة 95٪: <b>±${vol.expectedDailyRangePct}٪</b> ≈ <b>${(price * (1 - vol.expectedDailyRangePct / 100)).toFixed(2)} — ${(price * (1 + vol.expectedDailyRangePct / 100)).toFixed(2)}$</b></div>` : ''}
         <div style="${ROW}">متوسط المدى الحقيقي ATR(14): <b>${a}$</b> (${(a / price * 100).toFixed(2)}٪ من السعر)</div>
         <div style="margin-top:10px;padding:10px 12px;background:rgba(74,158,255,.08);border:1px solid rgba(74,158,255,.25);border-radius:8px">
-          <div style="font-weight:700;margin-bottom:4px">🇸🇦 حدّ التذبذب اليومي في السوق الرئيسية (±${limits.limitPct}٪)</div>
-          <div>أعلى سعر ممكن في الجلسة القادمة: <b style="color:#0ecf7e">${limits.up}$</b> · أدنى سعر: <b style="color:#f04458">${limits.down}$</b></div>
+          <div style="font-weight:700;margin-bottom:4px">🇺🇸 لا يوجد حدّ تذبذب يومي في السوق الأمريكي</div>
+          <div style="font-size:12px;color:#c8d0e0;line-height:1.85">
+            آلية LULD توقف التداول خمس دقائق عند حركة سريعة خارج نطاق مرجعي متحرّك، لكنها <b>لا تضع سقفاً للسعر</b>:
+            بعد استئناف التداول يمكن للسهم أن يواصل في الاتجاه نفسه. لذلك لا يُعرض هنا "أعلى/أدنى سعر ممكن غداً" —
+            الرقم الوحيد القابل للقياس هو المدى المتوقع من التذبذب أعلاه، وهو نطاق احتمالي لا حدّ إلزامي.
+          </div>
         </div>
       </div>
 
@@ -5840,6 +5863,8 @@ async function smartTimingAnalysis() {
         : 'لا يوجد توقيت زمني قابل للاعتماد على هذا السهم';
 
     const html = `
+      ${timeActivationCard(symbol)}
+
       <div style="${SEC}border-color:${sumColor}55;background:${sumColor}0a">
         <div style="${HEAD}">📌 الخلاصة التنفيذية</div>
         <div style="font-size:16px;font-weight:800;color:${sumColor};margin-bottom:10px">${nOk >= 3 ? '✅' : nOk >= 1 ? '⚠️' : '⛔'} ${sumTitle}</div>
@@ -5905,7 +5930,7 @@ async function smartTimingAnalysis() {
         const b = conf.barsSincePivot;
         const rows = emp.cycles.map(c => {
           const left = c.cycle - b;
-          const dt = left > 0 ? KSAEngine.SaudiMarket.addTradingDays(new Date(), left) : null;
+          const dt = left > 0 ? usAddTradingDays(left) : null;
           const inWin = Math.abs(left) <= c.tolerance;
           return `<div style="${ROW}">${inWin ? '<span style="color:#0ecf7e">◉</span>' : left > 0 ? '<span style="color:#f5c842">○</span>' : '<span style="color:#3d4a5e">✗</span>'}
             دورة <b>${c.cycle} جلسة</b> (×${c.lift}، p=${c.pValue}) —
@@ -5931,7 +5956,7 @@ async function smartTimingAnalysis() {
         ${spectral.gridErrorPct != null ? `<div style="${ROW}"><span style="font-size:11.5px;color:#9aa4b8">🛠️ التردد منقّى خارج شبكة فورييه — صُحّح انحراف ${spectral.gridErrorPct}٪. بلا هذه التنقية ينجرف الطور تراكمياً، وعند الدورات الطويلة يبلغ الانجراف نصف دورة (القمة المتوقعة تقع عند القاع الحقيقي).</span></div>` : ''}
         ${(() => { const tt = projectSpectralTurningPoints(spectral, candles.length - 1, 90); return tt.length ? `<div style="margin-top:9px;padding:10px 12px;background:rgba(34,211,238,.07);border:1px solid rgba(34,211,238,.25);border-radius:8px">
           <div style="font-weight:700;margin-bottom:6px">📅 الانعطافات المتوقعة — بعدم يقين معلن</div>
-          ${tt.slice(0, 5).map(x => { const dt = KSAEngine.SaudiMarket.addTradingDays(new Date(), x.candlesAhead); return `<div style="${ROW}">${x.type === 'valley' ? '🟢 قاع' : '🔴 قمة'} بعد <b>${x.candlesAhead}</b> جلسة${x.sdBars != null ? ` <span style="color:#9aa4b8">± ${x.sdBars}</span> → النافذة <b>[${x.loBars} – ${x.hiBars}]</b>` : ''} <span style="font-size:11px;color:#9aa4b8">(${dt.toLocaleDateString('ar-EG')})</span> ${x.usable ? '<span style="color:#0ecf7e">✓</span>' : '<span style="color:#f5c842">⚠ أوسع من ربع دورة</span>'}</div>`; }).join('')}
+          ${tt.slice(0, 5).map(x => { const dt = usAddTradingDays(x.candlesAhead); return `<div style="${ROW}">${x.type === 'valley' ? '🟢 قاع' : '🔴 قمة'} بعد <b>${x.candlesAhead}</b> جلسة${x.sdBars != null ? ` <span style="color:#9aa4b8">± ${x.sdBars}</span> → النافذة <b>[${x.loBars} – ${x.hiBars}]</b>` : ''} <span style="font-size:11px;color:#9aa4b8">(${dt.toLocaleDateString('ar-EG')})</span> ${x.usable ? '<span style="color:#0ecf7e">✓</span>' : '<span style="color:#f5c842">⚠ أوسع من ربع دورة</span>'}</div>`; }).join('')}
           <div style="margin-top:6px;font-size:11.5px;color:#9aa4b8">النطاق محسوب من حدّ كرامر-راو على سعة الدورة وتشتّت البواقي، ويتّسع كلما بَعُد الأفق — لأنه كذلك فعلاً.</div>
         </div>` : ''; })()}
         <div style="${ROW}">${spectral.verdict}</div>
@@ -6699,11 +6724,14 @@ function ddAddFromDecision(sym) {
   if (!entry || entry <= 0) return;
   DD.book.push({
     id: Date.now(), sym, name: r.name, sec: r.sec, qty, entry: +entry.toFixed(2),
-    stop: r.tp.stop, t1: r.tp.targets[0].price, t2: r.tp.targets[1]?.price ?? null,
+    /* 🛠️ كان يسجّل tp.targets[0] وهو محسوب من السعر الحالي، فقد يقع تحت
+       سعر التنفيذ في وضع الاختراق. المعتمد هو الهدف الذي أقرّه القرار. */
+    stop: r.tp.stop, t1: r.finalTarget,
+    t2: (r.tp.targets || []).map(t => t.price).find(p => p > r.finalTarget * 1.005) ?? null,
     ts: Date.now(), t1Taken: false, why: r.label
   });
   DD.save(); ddUpdateBar();
-  alert(`✅ سُجّل المركز: ${qty} سهم من ${sym} عند ${entry}$\nالوقف ${r.tp.stop} · الهدف الأول ${r.tp.targets[0].price}`);
+  alert(`✅ سُجّل المركز: ${qty} سهم من ${sym} عند ${entry}$\nالوقف ${r.tp.stop} · الهدف ${r.finalTarget}`);
   if (document.getElementById('tar-overlay')?.style.display === 'block') ddBook();
 }
 window.ddAddFromDecision = ddAddFromDecision;
@@ -7140,35 +7168,26 @@ function ddDecide2(d, regime, mode) {
   const ind = G.ind[sym] || {};
   const atr = ind.atr > 0 ? ind.atr : d.price * 0.015;
 
-  /* ── هدف الفراكتال ──
-     «الهدف = 2R» حشو تعريفي: الهدف عُرِّف بأنه ضعف المخاطرة ثم عُرض
-     العائد/المخاطرة 1:2 كأنه نتيجة تحليل. الهدف الفراكتالي مشتقّ من
-     البنية: أقرب قمة فراكتالية لم تُكسر هي حيث تنتظر أوامر البيع فعلاً. */
-  let fracTarget = null, fracSrc = null, fracUp = null;
-  if (fr && fr.ok && fr.target && fr.target > tp.entry * 1.005) {
-    fracTarget = fr.target; fracSrc = fr.targetSource;
-    fracUp = +((fracTarget - tp.entry) / tp.entry * 100).toFixed(2);
-  }
+  /* ══════════════════════════════════════════════════════════════════
+     🛠️ إصلاح جوهري: كل الأرقام تُحسب من **سعر التنفيذ الفعلي**، لا من
+     tp.entry.
+     ──────────────────────────────────────────────────────────────────
+     العطل في النسخة السابقة كان صامتاً ومكلفاً. في وضع «جاهزة للانطلاق»:
+       • زناد الدخول = أقرب قمة فراكتالية غير مكسورة × 1.003
+       • والهدف المعروض = نفس تلك القمة الفراكتالية
+     أي أن الأمر كان: اشترِ فوق المستوى، واستهدف المستوى نفسه — هدف تحت
+     سعر الدخول. رُصد فعلياً على AAPL في الاختبار:
+         تنفيذ 329.90 · هدف 328.91 · ومع ذلك عُرض «العائد 1.83R».
+     ومصدر الرقم 1.83 أنه حُسب من tp.entry=320.10 لا من 329.90، فهو عائد
+     صفقة لن تُنفَّذ أصلاً. العائد الحقيقي من التنفيذ كان **سالباً**.
 
-  const risk = tp.entry - tp.stop;
-  const rrFrac = fracTarget && risk > 0 ? +((fracTarget - tp.entry) / risk).toFixed(2) : null;
-  /* العائد المعتمد: الفراكتالي إن وُجد (لأنه بنيوي)، وإلا الهيكلي */
-  const rr = rrFrac ?? tp.rrFirst;
-  const rrSrc = rrFrac ? 'هدف فراكتالي' : 'هدف هيكلي';
+     الترتيب الصحيح — وهو المطبَّق الآن:
+       ① نقرّر نوع الإجراء،  ② نشتق سعر التنفيذ منه،
+       ③ نختار هدفاً **فوق سعر التنفيذ حصراً**،
+       ④ ثم نحسب المخاطرة والعائد وحجم المركز من سعر التنفيذ.
+     ══════════════════════════════════════════════════════════════════ */
 
-  const stopATR = +(risk / atr).toFixed(2);
-  const minRR = mode === 'launch' ? 1.0 : DD.cfg.minRR;
-  if (!(rr >= minRR)) return fail('المخاطرة/العائد', `العائد ${rr ?? '—'}R (${rrSrc}) دون الحد ${minRR}R`);
-  if (stopATR > 3.5) return fail('المخاطرة/العائد', `الوقف يبعد ${stopATR}×ATR — أوسع من أن يُدار`);
-  if (stopATR < 0.6) return fail('المخاطرة/العائد', `الوقف يبعد ${stopATR}×ATR — سيُضرب بالضجيج اليومي`);
-  pass('المخاطرة/العائد', `العائد ${rr}R (${rrSrc}) · مسافة الوقف ${stopATR}×ATR`);
-
-  /* ⑥ حجم المركز */
-  const size = ddSize(tp.entry, tp.stop, liq, d.sec || secName(sym), regime.mult);
-  if (!size.ok) return fail('حجم المركز', size.why);
-  pass('حجم المركز', size.why);
-
-  /* ── صياغة القرار ── */
+  /* ── ① الإجراء ── */
   let action, label, color;
   const vScore = verdict?.score ?? 50;
   const strongA = ev.A.length >= 2;
@@ -7187,24 +7206,70 @@ function ddDecide2(d, regime, mode) {
     else { action = 'watch'; label = '👁 مراقبة'; color = '#7a8ba8'; }
   }
 
-  const qty = action === 'buy_half' ? Math.floor(size.qty / 2) : size.qty;
-
-  /* زناد الانطلاق: الاختراق فوق أقرب قمة فراكتالية غير مكسورة */
+  /* ── ② سعر التنفيذ ── */
   const trigPrice = fr?.ok && fr.target1 ? +(fr.target1 * 1.003).toFixed(2) : tp.entry;
   const execPrice = mode === 'launch'
     ? (action === 'buy' ? d.price : trigPrice)
     : (action === 'buy_stop' ? tp.entry : action === 'wait' ? (verdict?.bestEntry ?? tp.entry) : tp.entry);
 
+  if (!(execPrice > 0)) return fail('الخطة التنفيذية', 'سعر تنفيذ غير صالح');
+  if (!(tp.stop < execPrice))
+    return fail('الخطة التنفيذية', `الوقف ${tp.stop} فوق سعر التنفيذ ${execPrice} — خطة مقلوبة، تُرفض ولا تُعرض`);
+
+  /* ── ③ الهدف: فوق سعر التنفيذ حصراً ──
+     الترتيب بنيوي: القمة الفراكتالية الحيّة، ثم الحركة المقيسة، ثم أقرب
+     مقاومة هيكلية، وأخيراً امتداد 2R موسوماً بأنه امتداد لا مستوى. */
+  const MIN_UP = execPrice * 1.005;
+  const cands = [];
+  if (fr?.ok) {
+    if (fr.target1 > MIN_UP) cands.push({ p: fr.target1, s: 'أقرب قمة فراكتالية غير مكسورة', frac: true });
+    if (fr.target2 > MIN_UP) cands.push({ p: fr.target2, s: 'القمة الفراكتالية التالية', frac: true });
+    if (fr.measuredMove > MIN_UP) cands.push({ p: fr.measuredMove, s: 'حركة مقيسة من آخر ساق دافعة', frac: true });
+  }
+  for (const t of (tp.targets || [])) if (t.price > MIN_UP) cands.push({ p: t.price, s: t.source, frac: false });
+  cands.sort((a, b) => a.p - b.p);
+
+  const riskPS = +(execPrice - tp.stop).toFixed(2);
+  let chosen = cands[0] || null;
+  if (!chosen && riskPS > 0) {
+    chosen = { p: +(execPrice + riskPS * 2).toFixed(2), s: 'امتداد 2R — لا يوجد مستوى بنيوي فوق سعر التنفيذ', frac: false, synthetic: true };
+  }
+  if (!chosen) return fail('الخطة التنفيذية', 'لا يوجد هدف صالح فوق سعر التنفيذ');
+
+  const finalTarget = +(+chosen.p).toFixed(2);
+  const fracTarget = chosen.frac ? finalTarget : null;
+  const fracSrc = chosen.s;
+  const fracUp = +((finalTarget - execPrice) / execPrice * 100).toFixed(2);
+
+  /* ── ④ العائد والمخاطرة — من سعر التنفيذ ── */
+  const rr = riskPS > 0 ? +((finalTarget - execPrice) / riskPS).toFixed(2) : null;
+  const rrSrc = chosen.synthetic ? 'امتداد 2R (لا مستوى بنيوي)'
+    : chosen.frac ? 'هدف فراكتالي' : 'هدف هيكلي';
+  const stopATR = +(riskPS / atr).toFixed(2);
+  const minRR = mode === 'launch' ? 1.0 : DD.cfg.minRR;
+
+  if (!(rr >= minRR)) return fail('المخاطرة/العائد',
+    `العائد ${rr ?? '—'}R (${rrSrc}) دون الحد ${minRR}R — محسوب من سعر التنفيذ ${execPrice} لا من السعر الحالي`);
+  if (stopATR > 3.5) return fail('المخاطرة/العائد', `الوقف يبعد ${stopATR}×ATR عن سعر التنفيذ — أوسع من أن يُدار`);
+  if (stopATR < 0.6) return fail('المخاطرة/العائد', `الوقف يبعد ${stopATR}×ATR — سيُضرب بالضجيج اليومي`);
+  pass('المخاطرة/العائد', `العائد ${rr}R (${rrSrc}) · المخاطرة ${riskPS}$/سهم من سعر التنفيذ ${execPrice} · مسافة الوقف ${stopATR}×ATR`);
+
+  /* ⑥ حجم المركز — من سعر التنفيذ أيضاً، لا من السعر الحالي */
+  const size = ddSize(execPrice, tp.stop, liq, d.sec || secName(sym), regime.mult);
+  if (!size.ok) return fail('حجم المركز', size.why);
+  pass('حجم المركز', size.why);
+
+  const qty = action === 'buy_half' ? Math.floor(size.qty / 2) : size.qty;
+
   const trigger = mode === 'launch'
     ? (action === 'buy'
       ? `السهم ملفوف وجاهز — دخول عند السعر الحالي، والزناد التأكيدي إغلاق فوق ${fr?.target1 ?? '—'}`
-      : `أمر شراء موقوف فوق ${trigPrice}$ (كسر أقرب قمة فراكتالية) — لا تشترِ تحته، السهم ما زال في مرحلة اللف`)
+      : `أمر شراء موقوف فوق ${trigPrice}$ (كسر أقرب قمة فراكتالية) — لا تشترِ تحته، السهم ما زال في مرحلة اللف. والهدف ${finalTarget}$ فوق الزناد لا عنده.`)
     : (action === 'buy' ? 'نفّذ عند السعر الحالي — الارتداد وقع فعلاً'
       : action === 'buy_stop' ? `أمر شراء موقوف عند ${tp.entry}$`
         : action === 'buy_half' ? 'نصف الكمية الآن، والباقي بعد إغلاق فوق الهدف الأول'
           : action === 'wait' ? (verdict?.bestEntryWhy || '—') : 'تحت المراقبة');
 
-  const finalTarget = fracTarget ?? tp.targets[0].price;
   const sessionsToT = atr > 0 ? Math.ceil((finalTarget - execPrice) / atr) : null;
 
   /* الترتيب: في وضع الانطلاق تحكم الجاهزية، وفي وضع التنفيذ تحكم الأدلة */
@@ -7331,7 +7396,7 @@ function ddRenderTable2() {
       <td style="font-family:monospace;color:#FFD700;font-weight:700">${r.execPrice}</td>
       <td style="font-family:monospace;color:var(--dn)">${r.tp.stop}</td>
       <td style="font-family:monospace;color:var(--up);font-weight:700" title="${r.fracSrc || 'هدف هيكلي'}">
-        ${r.fracTarget ?? r.tp.targets[0].price}${r.fracUp != null ? `<span style="color:var(--t3);font-weight:400"> +${r.fracUp}%</span>` : ''}</td>
+        ${r.finalTarget}${r.fracUp != null ? `<span style="color:var(--t3);font-weight:400"> +${r.fracUp}%</span>` : ''}</td>
       <td style="font-family:monospace;font-weight:700">1:${r.rr}</td>
       <td style="font-family:monospace">${ddFmt(r.qty)}</td>
       <td style="font-size:calc(var(--base-font)*0.78)">${timeCell}</td>
@@ -7456,6 +7521,8 @@ function ddReport2(sym) {
     </div>`).join('') : `<div style="font-size:12px;color:#3d4a5e;padding:4px 0">لا شيء</div>`;
 
   const html = `
+    ${timeActivationCard(r.sym)}
+
     <div style="${SEC_}border-color:${r.color}55;background:${r.color}0a">
       <div style="font-size:20px;font-weight:800;color:${r.color};margin-bottom:8px">${r.label}</div>
       <div style="font-size:13px;line-height:2">
@@ -7515,6 +7582,522 @@ function ddReport2(sym) {
 }
 window.ddReport2 = ddReport2;
 window.ddReport = ddReport2;
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   🗓️ تقويم التداول الأمريكي — غلاف واحد لكل تحويل «جلسات ← تاريخ»
+   ──────────────────────────────────────────────────────────────────────
+   كانت الواجهة تنادي KSAEngine.SaudiMarket مباشرةً في مواضع متفرّقة.
+   الاسم موروث من نسخة سعودية سابقة، والمحرّك الحالي (3.0.0-US) يجعله
+   مجرد اسم مستعار لـ USMarket — فالسلوك سليم لكن القراءة مضلّلة، وأي
+   عودة للاسم إلى معناه الحرفي تكسر كل التواريخ بصمت.
+
+   الحل: نداء واحد اسمه صريح، يفوّض إلى تقويم المحرّك (وهو الأدقّ: يحمل
+   العطل وأنصاف الجلسات ويحسب اليوم بتوقيت نيويورك لا بتوقيت جهاز
+   المستخدم)، ويسقط إلى جدول محلي فقط إن لم يُحمّل المحرّك.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/** عطل السوق الأمريكي المُلاحَظة (بلا الجمعة العظيمة المتغيرة سنوياً — تُضاف يدوياً). */
+const US_HOLIDAYS = new Set([
+  '2025-01-01','2025-01-09','2025-01-20','2025-02-17','2025-04-18','2025-05-26',
+  '2025-06-19','2025-07-04','2025-09-01','2025-11-27','2025-12-25',
+  '2026-01-01','2026-01-19','2026-02-16','2026-04-03','2026-05-25',
+  '2026-06-19','2026-07-03','2026-09-07','2026-11-26','2026-12-25',
+  '2027-01-01','2027-01-18','2027-02-15','2027-03-26','2027-05-31',
+  '2027-06-18','2027-07-05','2027-09-06','2027-11-25','2027-12-24'
+]);
+
+function _isoDay(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** هل هذا اليوم جلسة تداول أمريكية؟ (الاثنين→الجمعة، بلا العطل المُدرجة) */
+function usIsTradingDay(d) {
+  const w = d.getDay();
+  if (w === 0 || w === 6) return false;
+  return !US_HOLIDAYS.has(_isoDay(d));
+}
+
+/** يضيف n جلسة تداول أمريكية إلى تاريخ (افتراضياً اليوم).
+ *  المرجع الأول هو تقويم المحرّك (KSAEngine.USMarket) لأنه يحمل العطل
+ *  وأنصاف الجلسات ويحسب اليوم بتوقيت نيويورك لا بتوقيت جهاز المستخدم —
+ *  وهو فرق حقيقي: مستخدم في جدة بعد منتصف الليل يكون في اليوم التالي
+ *  بينما السوق الأمريكي ما زال في اليوم السابق. الجدول المحلي أدناه
+ *  احتياطي فقط إن لم يُحمَّل المحرّك. */
+function usAddTradingDays(n, from) {
+  const base = from ? new Date(from) : new Date();
+  const M = window.KSAEngine && KSAEngine.USMarket;
+  if (M && typeof M.addTradingDays === 'function') {
+    try { return M.addTradingDays(base, Math.max(0, Math.round(n || 0))); } catch (e) { }
+  }
+  const d = new Date(base);
+  d.setHours(12, 0, 0, 0);
+  let left = Math.max(0, Math.round(n || 0));
+  if (left === 0) {
+    while (!usIsTradingDay(d)) d.setDate(d.getDate() + 1);
+    return d;
+  }
+  while (left > 0) {
+    d.setDate(d.getDate() + 1);
+    if (usIsTradingDay(d)) left--;
+  }
+  return d;
+}
+
+/** تنسيق تاريخ مختصر بالعربية. */
+function usFmtDate(d) {
+  try { return d.toLocaleDateString('ar-EG', { day: '2-digit', month: '2-digit' }); }
+  catch (e) { return `${d.getDate()}/${d.getMonth() + 1}`; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   🕐 «متى ينشط هذا السهم زمنياً؟»
+   ──────────────────────────────────────────────────────────────────────
+   بطاقة واحدة تتصدّر تقارير التحليل الزمني والتنبؤ وقرار السهم وعقد
+   الأوبشن، تعطي جملة صريحة بدل سبع فقرات إحصائية يستنتج منها القارئ
+   بنفسه.
+
+   ترتيب المصادر مقصود، وهو ترتيب بقوة الإسناد لا بقرب التاريخ:
+
+     ① الدورة الطيفية المقاسة على السهم نفسه — وهي وحدها التي تحمل
+        نطاق عدم يقين مقاساً (حدّ كرامر-راو)، فتقول «بعد ٧ جلسات،
+        النافذة العملية ٤–١١» لا «يوم الثلاثاء». ويُذكر معها هل أثبتت
+        الدورة إصابتها خارج العيّنة أم لا.
+     ② دورات هذا السهم المؤكَّدة تجريبياً (اختبار تبديل + تصحيح BH)،
+        مع تصريح بأن السهم داخل نافذته الآن أو لم يبلغها بعد.
+     ③ النوافذ الكلاسيكية (غان/فيبوناتشي) — تُعرض أخيراً وموسومة صراحةً
+        بأنها أرقام مفروضة من خارج السهم لم يثبت انطباقها عليه.
+
+   وإن لم يوجد شيء دال، تقول ذلك صراحةً: لا موعد قابل للقياس. وهذه حال
+   أغلب الأسهم. إجبار النافذة الزمنية على سهم لا يتحرك بها هو بالضبط ما
+   ينتج التواريخ الوهمية.
+   ══════════════════════════════════════════════════════════════════════ */
+
+let _taCache = {};
+
+/** أقرب دعم إن كان الانعطاف قاعاً، وأقرب مقاومة إن كان قمة —
+ *  حتى لا يبقى التاريخ وحده بلا سعر تراقبه عنده. */
+function taWatchLevel(sym, isValley) {
+  try {
+    const cs = G.cans[sym];
+    if (!cs || cs.length < 20) return null;
+    const cur = cs[cs.length - 1].close;
+    const sr = calcSupportResistance(cs, G.ind[sym], cur);
+    const lv = isValley ? sr.supports[0] : sr.resistances[0];
+    if (!lv) return null;
+    return {
+      price: lv.price,
+      label: isValley ? 'أقرب دعم' : 'أقرب مقاومة',
+      src: (lv.sources || []).join(' + '),
+      distPct: +((lv.price - cur) / cur * 100).toFixed(2)
+    };
+  } catch (e) { return null; }
+}
+
+function timeActivation(sym) {
+  const cs = G.cans[sym];
+  const out = {
+    sym, ok: false, sources: [], primary: null, watch: null,
+    headline: '', sub: '', color: '#9aa4b8', icon: '⛔'
+  };
+
+  if (!cs || cs.length < 80) {
+    out.headline = `لا يمكن قياس التوقيت — متوفر ${cs?.length || 0} جلسة والحد الأدنى 80.`;
+    out.sub = 'الدورات تُقاس بعشرات الجلسات؛ استخراجها من عيّنة أقصر يعطي تواريخ دقيقة المظهر بلا أساس. وسّع النطاق الزمني من أزرار الفريم.';
+    return out;
+  }
+  if (G.demo && G.demo.has(sym)) {
+    out.headline = 'بيانات تجريبية — لا يُبنى توقيت على أرقام غير حقيقية.';
+    return out;
+  }
+
+  const key = sym + '|' + cs.length;
+  if (_taCache[key]) return _taCache[key];
+
+  /* ── ① الدورة الطيفية — المصدر الوحيد ذو نطاق عدم يقين مقاس ── */
+  const tm = ddTiming(sym);
+  if (tm && tm.ok && tm.significant) {
+    const turns = (tm.turns || []).filter(t => t.barsAhead != null && t.barsAhead >= 0);
+    const nx = turns[0] || null;
+    const validated = !!tm.coherent;
+    out.sources.push({
+      rank: 1, key: 'spectral', tier: 'مقاسة على السهم نفسه',
+      name: 'الدورة الطيفية',
+      ok: true, validated,
+      detail: `دورة مهيمنة ${tm.period} جلسة · p=${tm.pText} · إشارة/ضجيج ${tm.snr}` +
+        (validated
+          ? ' · <b style="color:#0ecf7e">أثبتت إصابتها خارج العيّنة</b>'
+          : ' · <span style="color:#f5c842">لم تُثبت إصابتها خارج العيّنة</span>')
+    });
+    if (nx) {
+      out.primary = {
+        source: 'spectral',
+        sourceLabel: 'الدورة الطيفية المقاسة على السهم',
+        type: nx.type, isValley: nx.type === 'valley',
+        barsAhead: nx.barsAhead,
+        sdBars: nx.sdBars ?? null,
+        loBars: nx.loBars ?? nx.barsAhead,
+        hiBars: nx.hiBars ?? nx.barsAhead,
+        usable: nx.usable !== false,
+        validated,
+        period: tm.period
+      };
+    }
+  } else if (tm && tm.ok && !tm.significant) {
+    out.sources.push({
+      rank: 1, key: 'spectral', tier: 'مقاسة على السهم نفسه', name: 'الدورة الطيفية',
+      ok: false, validated: false,
+      detail: `غير دالة إحصائياً (p=${tm.pText}) — لا تُسقَط منها نافذة. رسم موجة على ضجيج ينتج تواريخ بلا أساس.`
+    });
+  } else {
+    out.sources.push({
+      rank: 1, key: 'spectral', tier: 'مقاسة على السهم نفسه', name: 'الدورة الطيفية',
+      ok: false, validated: false, detail: tm?.reason || 'تعذّر القياس'
+    });
+  }
+
+  /* ── ② دورات هذا السهم المؤكَّدة تجريبياً ── */
+  let emp = null, barsSince = null;
+  try {
+    if (window.KSAEngine?.empiricalPivotCycles) {
+      const pv = KSAEngine.lastConfirmedPivot(cs, 3);
+      if (pv) {
+        const conf = KSAEngine.timeConfluence(cs, pv);
+        barsSince = conf?.barsSincePivot ?? null;
+        emp = KSAEngine.empiricalPivotCycles(cs, { permutations: 300 });
+      }
+    }
+  } catch (e) { }
+
+  const empCycles = (emp && emp.ok && emp.cycles) ? emp.cycles : [];
+  if (empCycles.length && barsSince != null) {
+    const enriched = empCycles.map(c => {
+      const left = c.cycle - barsSince;
+      return { ...c, left, inWindow: Math.abs(left) <= (c.tolerance ?? 2) };
+    });
+    const inNow = enriched.find(c => c.inWindow);
+    const nextUp = enriched.filter(c => c.left > 0).sort((a, b) => a.left - b.left)[0];
+    out.sources.push({
+      rank: 2, key: 'empirical', tier: 'مقاسة على السهم نفسه',
+      name: 'دورات السهم المؤكَّدة تجريبياً', ok: true, validated: true,
+      detail: `${enriched.length} دورة اجتازت اختبار التبديل: ${enriched.map(c => c.cycle + 'ج').join(' · ')} — ` +
+        (inNow
+          ? `<b style="color:#0ecf7e">السهم داخل نافذة دورة ${inNow.cycle} جلسة الآن</b> (مضى ${barsSince} جلسة منذ الارتكاز، والتسامح ±${inNow.tolerance})`
+          : nextUp
+            ? `السهم ليس داخل نافذته الآن — تبقّى ${nextUp.left} جلسة على دورة ${nextUp.cycle}`
+            : `كل الدورات مضت منذ آخر ارتكاز (${barsSince} جلسة)`)
+    });
+    if (!out.primary && (inNow || nextUp)) {
+      const c = inNow || nextUp;
+      const pvType = (() => { try { return KSAEngine.lastConfirmedPivot(cs, 3)?.type; } catch (e) { return null; } })();
+      const isValley = pvType === 'H';
+      out.primary = {
+        source: 'empirical',
+        sourceLabel: 'دورة ارتكاز مؤكَّدة تجريبياً على هذا السهم',
+        type: isValley ? 'valley' : 'peak', isValley,
+        barsAhead: Math.max(0, c.left),
+        sdBars: c.tolerance ?? null,
+        loBars: Math.max(0, c.left - (c.tolerance ?? 2)),
+        hiBars: Math.max(0, c.left) + (c.tolerance ?? 2),
+        usable: true, validated: true, period: c.cycle
+      };
+    }
+  } else {
+    out.sources.push({
+      rank: 2, key: 'empirical', tier: 'مقاسة على السهم نفسه',
+      name: 'دورات السهم المؤكَّدة تجريبياً', ok: false, validated: false,
+      detail: emp ? (emp.note || emp.reason || 'لم تتكرّر أي مسافة زمنية أكثر مما تنتجه الصدفة') : 'تعذّر الاختبار'
+    });
+  }
+
+  /* ── ③ النوافذ الكلاسيكية — مفروضة من خارج السهم ── */
+  let cw = null;
+  try {
+    const pv = KSAEngine.lastConfirmedPivot(cs, 3);
+    if (pv) {
+      const ws = KSAEngine.timeWindows(cs, { i: pv.i, price: pv.price, type: pv.type }, { horizonDays: 240 }) || [];
+      cw = ws.filter(w => w.barsAhead != null && w.barsAhead >= 0)[0] || null;
+    }
+  } catch (e) { }
+  out.sources.push({
+    rank: 3, key: 'classic', tier: '⚠️ أرقام مفروضة من خارج السهم',
+    name: 'النوافذ الكلاسيكية (غان/فيبوناتشي)',
+    ok: !!cw, validated: false,
+    detail: cw
+      ? `أقرب نافذة: ${cw.label} بعد ${cw.barsAhead} جلسة — <span style="color:#f5c842">لم يثبت أن هذه الأرقام تنطبق على هذا السهم</span>`
+      : 'لا نافذة كلاسيكية قادمة ضمن أفق 240 يوماً'
+  });
+  if (!out.primary && cw) {
+    const pvType = (() => { try { return KSAEngine.lastConfirmedPivot(cs, 3)?.type; } catch (e) { return null; } })();
+    const isValley = pvType === 'H';
+    out.primary = {
+      source: 'classic',
+      sourceLabel: 'نافذة كلاسيكية — رقم مفروض من خارج السهم',
+      type: isValley ? 'valley' : 'peak', isValley,
+      barsAhead: cw.barsAhead, sdBars: null,
+      loBars: cw.barsAhead, hiBars: cw.barsAhead,
+      usable: false, validated: false, period: null, weak: true
+    };
+  }
+
+  /* ── الصياغة: جملة واحدة صريحة ── */
+  if (out.primary) {
+    const p = out.primary;
+    out.ok = true;
+    p.date = usAddTradingDays(p.barsAhead);
+    p.dateText = usFmtDate(p.date);
+    out.watch = taWatchLevel(sym, p.isValley);
+
+    const kind = p.isValley ? 'نشاط صعودي (قاع متوقع)' : 'انعطاف هبوطي (قمة متوقعة)';
+    const whenTxt = p.barsAhead === 0 ? 'اليوم' : p.barsAhead === 1 ? 'الجلسة القادمة' : `بعد ${p.barsAhead} جلسة`;
+    const bandTxt = (p.loBars !== p.hiBars)
+      ? `، والنافذة العملية بين ${p.loBars} و${p.hiBars} جلسة`
+      : '';
+
+    if (p.source === 'spectral') {
+      out.color = p.validated ? '#0ecf7e' : (p.usable ? '#f5c842' : '#fb923c');
+      out.icon = p.validated ? '✅' : '⚠️';
+      out.headline = `أقرب ${kind} ${whenTxt}${bandTxt} — بتاريخ تقديري ${p.dateText}.`;
+      out.sub = p.validated
+        ? `المصدر دورة ${p.period} جلسة مقاسة على هذا السهم، <b>وأثبتت إصابتها على بيانات لم ترها</b>. هذه وحدها تصلح للتوقيت.`
+        : `المصدر دورة ${p.period} جلسة دالة إحصائياً، لكنها <b>لم تُختبر بنجاح خارج العيّنة</b> — وصف للماضي لا أداة توقيت. للتنبيه لا للتنفيذ.`;
+      if (!p.usable) out.sub += ' كما أن نطاق الانعطاف أوسع من ربع دورة، فلا تُبنى عليه صفقة.';
+    } else if (p.source === 'empirical') {
+      out.color = '#22d3ee'; out.icon = '◉';
+      out.headline = p.barsAhead === 0
+        ? `السهم داخل نافذة دورته المؤكَّدة (${p.period} جلسة) الآن.`
+        : `أقرب ${kind} ${whenTxt}${bandTxt} — بتاريخ تقديري ${p.dateText}.`;
+      out.sub = `لا دورة طيفية دالة على هذا السهم، لكن المسافة ${p.period} جلسة بين ارتكازاته تتكرّر أكثر مما ينتجه الخلط العشوائي. مصدر أضعف من الطيف لأنه بلا نطاق عدم يقين مقاس.`;
+    } else {
+      out.color = '#7a8ba8'; out.icon = '⚠️';
+      out.headline = `لا موعد مقاس على هذا السهم — أقرب ما يوجد نافذة كلاسيكية ${whenTxt} (${p.dateText}).`;
+      out.sub = 'هذا رقم غان/فيبوناتشي مفروض من خارج السهم، ولم يثبت أنه ينطبق عليه. لا يُتّخذ قراراً، ويُستعمل تنبيهاً للمراقبة فقط.';
+    }
+  } else {
+    out.ok = false;
+    out.color = '#7a8ba8'; out.icon = '⛔';
+    out.headline = 'لا موعد زمني قابل للقياس على هذا السهم.';
+    out.sub = 'وهذه حال أغلب الأسهم ونتيجة صحيحة لا عطل: لا دورة طيفية دالة، ولا مسافة ارتكاز تتكرّر أكثر من الصدفة. ادخل عند مستوى واخرج عند مستوى، ولا تنتظر تاريخاً. إجبار النافذة الزمنية على سهم لا يتحرك بها هو بالضبط ما ينتج التواريخ الوهمية.';
+    out.watch = taWatchLevel(sym, true);
+  }
+
+  _taCache[key] = out;
+  return out;
+}
+
+/** البطاقة التي تتصدّر التقارير. compact=true نسخة مصغّرة لتقارير الأوبشن. */
+function timeActivationCard(sym, compact) {
+  let a;
+  try { a = timeActivation(sym); } catch (e) { return ''; }
+  if (!a) return '';
+  const pad = compact ? '11px 13px' : '14px 16px';
+  const fs = compact ? '14px' : '16.5px';
+
+  const srcRows = a.sources.map(s => `
+    <div style="padding:6px 0;border-bottom:1px dashed rgba(255,255,255,.07)">
+      <div style="font-weight:700;font-size:12.5px">
+        ${s.ok ? (s.validated ? '<span style="color:#0ecf7e">✓✓</span>' : '<span style="color:#f5c842">✓</span>') : '<span style="color:#3d4a5e">✗</span>'}
+        ${s.name}
+        <span style="font-size:10.5px;font-weight:400;color:${s.key === 'classic' ? '#f5c842' : '#22d3ee'}">— ${s.tier}</span>
+      </div>
+      <div style="font-size:11.5px;color:#9aa4b8;margin-top:2px;line-height:1.75">${s.detail}</div>
+    </div>`).join('');
+
+  const watchHtml = a.watch ? `
+    <div style="margin-top:9px;padding:8px 11px;background:rgba(74,158,255,.07);border:1px solid rgba(74,158,255,.22);border-radius:7px;font-size:12px">
+      🎚 <b>مستوى المراقبة:</b> ${a.watch.label} عند <b style="color:#FFD700">${a.watch.price}$</b>
+      <span style="color:#9aa4b8">(${a.watch.distPct > 0 ? '+' : ''}${a.watch.distPct}٪ عن السعر · ${a.watch.src})</span>
+      <div style="font-size:11px;color:#9aa4b8;margin-top:3px">التاريخ وحده لا يُتداول عليه — راقب السعر عند هذا المستوى عند بلوغ النافذة.</div>
+    </div>` : '';
+
+  return `
+    <div style="background:#151b2b;border:1px solid ${a.color}55;background:linear-gradient(135deg,${a.color}0d,#151b2b);border-radius:10px;padding:${pad};margin-bottom:14px">
+      <div style="color:${a.color};font-weight:800;font-size:13px;margin-bottom:9px;padding-bottom:7px;border-bottom:1px solid ${a.color}25">
+        🕐 متى ينشط هذا السهم زمنياً؟
+      </div>
+      <div style="font-size:${fs};font-weight:800;color:${a.color};line-height:1.65;margin-bottom:7px">${a.icon} ${a.headline}</div>
+      <div style="font-size:12.5px;color:#c8d0e0;line-height:1.9">${a.sub}</div>
+      ${watchHtml}
+      ${compact ? '' : `
+      <div style="margin-top:11px;padding-top:9px;border-top:1px solid rgba(255,255,255,.07)">
+        <div style="font-size:11.5px;color:#9aa4b8;margin-bottom:5px">المصادر مرتّبة بقوة الإسناد لا بقرب التاريخ — تاريخ بلا أساس مقاس لا يسبق تاريخاً مقاساً مهما كان أقرب:</div>
+        ${srcRows}
+      </div>`}
+    </div>`;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   📡 رادار الحركة المتوقعة — أُعيد بناؤه
+   ──────────────────────────────────────────────────────────────────────
+   سبب فراغه سابقاً لم يكن قلة الفرص، بل ثلاثة قيود تُفرغه حتماً:
+     • يُحسب داخل المسح الشامل فيثقله ويُهمَل؛
+     • لا يُبقي إلا سهماً نافذته خلال يومين تقويميين؛
+     • ومصدره الوحيد نوافذ غان/فيبوناتشي — أرقام مفروضة من خارج السهم.
+
+   الآن: المصدر الأول الدورة الطيفية المقاسة على السهم نفسه بنطاق عدم
+   يقين معلن، والنافذة الكلاسيكية نزلت إلى مرتبة احتياطية موسومة صراحةً
+   بضعفها. وعمود «التحقق» يفصل ما لم يكن مفصولاً: دورة دالة إحصائياً
+   شيء، ودورة أثبتت إصابتها على بيانات لم ترها شيء آخر.
+   ══════════════════════════════════════════════════════════════════════ */
+
+const RADAR = { rows: [], ran: false, busy: false, horizon: 10, strict: false, showClassic: true };
+
+function radarSetHorizon(h, el) {
+  RADAR.horizon = h;
+  document.querySelectorAll('.rdr-h').forEach(b => {
+    const on = b === el;
+    b.classList.toggle('on', on);
+    b.style.background = on ? 'rgba(255,107,53,.18)' : 'transparent';
+    b.style.color = on ? '#ff6b35' : 'var(--t2)';
+  });
+  if (RADAR.ran) radarRenderTable(); else radarCompute(false);
+}
+
+function radarToggleStrict(el) {
+  RADAR.strict = !RADAR.strict;
+  el.style.background = RADAR.strict ? 'rgba(14,207,126,.16)' : 'transparent';
+  el.style.borderColor = RADAR.strict ? 'rgba(14,207,126,.45)' : 'var(--bd2)';
+  el.style.color = RADAR.strict ? '#0ecf7e' : 'var(--t2)';
+  radarRenderTable();
+}
+
+function radarToggleClassic(el) {
+  RADAR.showClassic = !RADAR.showClassic;
+  el.style.background = RADAR.showClassic ? 'rgba(154,164,184,.12)' : 'transparent';
+  el.style.color = RADAR.showClassic ? 'var(--t2)' : 'var(--t3)';
+  radarRenderTable();
+}
+
+/** ترتيب بالمصدر الأقوى ثم بالقرب — لا العكس. */
+function _radarRank(r) {
+  const base = r.source === 'spectral' ? (r.validated ? 300 : 200)
+    : r.source === 'empirical' ? 150 : 50;
+  const prox = 12 * (1 - Math.min(1, r.barsAhead / Math.max(1, RADAR.horizon)));
+  return base + prox - (r.usable ? 0 : 25);
+}
+
+async function radarCompute(force) {
+  if (RADAR.busy) return;
+  const prog = document.getElementById('rdr-prog');
+  const syms = _advData.length
+    ? _advData.map(d => d.sym)
+    : Object.keys(G.cans || {}).filter(s => (G.cans[s] || []).length >= 80);
+
+  if (!syms.length) {
+    if (prog) prog.textContent = '⚠️ شغّل «🔬 مسح شامل» أولاً — الرادار يقرأ الأسهم المحمّلة.';
+    RADAR.ran = true; RADAR.rows = []; radarRenderTable();
+    return;
+  }
+  if (force) _taCache = {};
+
+  RADAR.busy = true;
+  const rows = [];
+  for (let i = 0; i < syms.length; i++) {
+    const s = syms[i];
+    if (prog && i % 8 === 0) prog.textContent = `يقيس الدورات… ${i + 1}/${syms.length}`;
+    try {
+      const a = timeActivation(s);
+      if (a && a.primary) {
+        const p = a.primary;
+        rows.push({
+          sym: s, name: NAMES[s] || s, price: G.pr[s] || 0, pct: G.pc[s] || 0,
+          type: p.type, isValley: p.isValley, barsAhead: p.barsAhead,
+          loBars: p.loBars, hiBars: p.hiBars, sdBars: p.sdBars,
+          source: p.source, sourceLabel: p.sourceLabel,
+          validated: p.validated, usable: p.usable, period: p.period,
+          dateText: p.dateText, watch: a.watch, headline: a.headline
+        });
+      }
+    } catch (e) { }
+    if (i % 12 === 11) await new Promise(r => setTimeout(r, 0)); /* لا يجمّد الواجهة */
+  }
+  rows.forEach(r => { r.rank = _radarRank(r); });
+  rows.sort((a, b) => b.rank - a.rank);
+  RADAR.rows = rows;
+  RADAR.ran = true;
+  RADAR.busy = false;
+  if (prog) prog.textContent = `اكتمل — قِيست دورات ${syms.length} سهماً · ${new Date().toLocaleTimeString('ar-EG')}`;
+  radarRenderTable();
+}
+
+function radarRenderTable() {
+  const body = document.getElementById('rtbody');
+  if (!body) return;
+
+  if (!RADAR.ran) {
+    body.innerHTML = `<tr><td colspan="10" style="padding:26px;text-align:center;color:var(--t3);line-height:2">
+      ${RADAR.busy ? 'يقيس الدورات على كل سهم…' : 'اضغط «📡 احسب الرادار» أعلاه.'}<br>
+      <span style="font-size:11px">يُحسب عند فتح التبويب لا داخل المسح الشامل، فلا يبطّئه.</span>
+    </td></tr>`;
+    _visibleSyms = []; return;
+  }
+
+  let rows = RADAR.rows.filter(r => r.barsAhead <= RADAR.horizon);
+  if (RADAR.strict) rows = rows.filter(r => r.source === 'spectral' && r.validated);
+  if (!RADAR.showClassic) rows = rows.filter(r => r.source !== 'classic');
+
+  const fbRadar = document.getElementById('fb-radar');
+  if (fbRadar) fbRadar.textContent = rows.length;
+
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="10" style="padding:24px;text-align:center;color:var(--t3);line-height:2">
+      لا سهم له انعطاف مقاس داخل أفق ${RADAR.horizon} جلسة${RADAR.strict ? ' بدورة مؤكَّدة خارج العيّنة' : ''}.<br>
+      <span style="color:#9aa4b8;font-size:11.5px;line-height:1.9">
+        وهذه <b>نتيجة صحيحة لا عطل</b>: أغلب الأسهم لا تتحرك بدورات قابلة للقياس.<br>
+        وسّع الأفق، أو ألغِ «الدورات المؤكدة خارج العيّنة فقط» — والشريط سيقول لك الحقيقة بدل أن يملأ الشاشة بتواريخ مخترعة.
+      </span></td></tr>`;
+    _visibleSyms = []; return;
+  }
+
+  _visibleSyms = rows.map(r => r.sym);
+  if (_focusedIdx >= _visibleSyms.length) _focusedIdx = _visibleSyms.length - 1;
+
+  const srcTag = r => r.source === 'spectral'
+    ? `<span style="color:#22d3ee;font-weight:700" title="مقاسة على السهم نفسه">🔬 دورة طيفية ${r.period}ج</span>`
+    : r.source === 'empirical'
+      ? `<span style="color:#a78bfa;font-weight:700" title="مقاسة على ارتكازات هذا السهم">◉ دورة ارتكاز ${r.period}ج</span>`
+      : `<span style="color:#f5c842" title="رقم غان/فيبوناتشي مفروض من خارج السهم">📐 كلاسيكية (احتياطي ضعيف)</span>`;
+
+  const verifyTag = r => r.source === 'classic'
+    ? '<span style="color:#f5c842">مفروضة من الخارج</span>'
+    : r.validated
+      ? '<span style="color:#0ecf7e;font-weight:700" title="أثبتت إصابتها على بيانات لم ترها">✓✓ مؤكَّدة خارج العيّنة</span>'
+      : '<span style="color:#f5c842" title="دالة إحصائياً لكن لم تُثبت إصابتها خارج العيّنة — وصف للماضي">✓ دالة فقط</span>';
+
+  body.innerHTML = rows.map((r, idx) => {
+    const turnCol = r.isValley ? 'var(--up)' : 'var(--dn)';
+    const when = r.barsAhead === 0 ? 'اليوم' : r.barsAhead === 1 ? 'الجلسة القادمة' : `بعد ${r.barsAhead} جلسة`;
+    const band = r.loBars !== r.hiBars ? `[${r.loBars} – ${r.hiBars}]` : '—';
+    return `
+    <tr data-idx="${idx}" class="${_focusedIdx === idx ? 'kb-focus' : ''}" onclick="selectStock('${r.sym}');setFocusedRow(${idx})"
+        style="cursor:pointer;border-right:3px solid ${r.source === 'classic' ? '#f5c842' : turnCol}">
+      <td style="font-weight:700;color:var(--bl);font-family:'IBM Plex Mono',monospace">${r.sym}</td>
+      <td style="max-width:96px;overflow:hidden;text-overflow:ellipsis">${r.name}</td>
+      <td style="font-family:monospace">${(+r.price).toFixed(2)}</td>
+      <td style="color:${r.pct >= 0 ? 'var(--up)' : 'var(--dn)'};font-family:monospace">${r.pct >= 0 ? '+' : ''}${(+r.pct).toFixed(2)}%</td>
+      <td style="white-space:nowrap"><span style="color:${turnCol};font-weight:700">${r.isValley ? '🟢 قاع' : '🔴 قمة'}</span>
+        <span style="color:var(--t2);font-size:calc(var(--base-font)*0.82)"> ${when}</span></td>
+      <td style="font-family:monospace;white-space:nowrap" title="${r.usable ? 'أضيق من ربع دورة — قابلة للتنفيذ' : 'أوسع من ربع دورة — للتنبيه لا للتنفيذ'}">
+        ${band}${r.sdBars != null ? `<span style="color:var(--t3)"> ±${r.sdBars}</span>` : ''}
+        ${r.usable ? '' : '<span style="color:#f5c842;font-size:calc(var(--base-font)*0.75)"> ⚠ للتنبيه لا للتنفيذ</span>'}</td>
+      <td style="font-size:calc(var(--base-font)*0.82)">${srcTag(r)}</td>
+      <td style="font-size:calc(var(--base-font)*0.8)">${verifyTag(r)}</td>
+      <td style="font-family:monospace;white-space:nowrap">${r.watch
+        ? `<span style="color:${r.isValley ? 'var(--up)' : 'var(--dn)'}" title="${r.watch.label} — ${r.watch.src}">${r.watch.price}</span>
+           <span style="color:var(--t3);font-size:calc(var(--base-font)*0.75)">${r.watch.distPct > 0 ? '+' : ''}${r.watch.distPct}٪</span>`
+        : '<span style="color:var(--t3)">—</span>'}</td>
+      <td style="font-family:monospace;color:var(--t2)">${r.dateText}</td>
+    </tr>`;
+  }).join('');
+}
+
+window.radarCompute = radarCompute;
+window.radarSetHorizon = radarSetHorizon;
+window.radarToggleStrict = radarToggleStrict;
+window.radarToggleClassic = radarToggleClassic;
+window.timeActivation = timeActivation;
+window.timeActivationCard = timeActivationCard;
+window.usAddTradingDays = usAddTradingDays;
 
 
 // ✅ تعريف الدوال للأزرار
