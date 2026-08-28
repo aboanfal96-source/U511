@@ -285,15 +285,22 @@ body{height:100%;background:var(--c0);color:var(--t1);font-family:'IBM Plex Sans
    الحل: شريط واحد يُمرَّر أفقياً بالإصبع، وأزرار بحجم يُلمس، وزرّ طيّ
    يخفي الشريط كله متى أراد المستخدم الشاشة للنتائج.
    ══════════════════════════════════════════════════════════════════════ */
+/* 🛠️ كان هنا  display:flex !important  وهو سبب تداخل التبويبات كله:
+   الأشرطة تُخفى بـ element.style.display='none' (نمط سطري)، و!important
+   في ورقة الأنماط يعلو على النمط السطري. فما إن يمرّ شريط على
+   makeBarsScrollable حتى يصير إخفاؤه مستحيلاً — فتتراكم أشرطة غرفة
+   القرار والرادار والطيف والأوبشن كلها فوق بعضها في كل تبويب.
+   الحل: لا !important على display إطلاقاً. أما nowrap فيبقى لأنه لا
+   يتعارض مع الإخفاء. */
 .hbar{
-  display:flex !important; flex-wrap:nowrap !important;
+  flex-wrap:nowrap !important;
   overflow-x:auto; overflow-y:hidden; -webkit-overflow-scrolling:touch;
   scrollbar-width:thin; scroll-snap-type:x proximity;
 }
 .hbar::-webkit-scrollbar{height:4px}
 .hbar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.18);border-radius:3px}
 .hbar > *{flex:0 0 auto; scroll-snap-align:start}
-.hbar.collapsed{display:none !important}
+.hbar[hidden]{display:none !important}
 .bar-toggle{
   position:sticky; inset-inline-start:0; z-index:3;
   background:var(--c3); border:1px solid var(--bd2); color:var(--t2);
@@ -1626,29 +1633,13 @@ function optCell(label, val, color) {
 function renderOptionsTab() {
   optEnsureDom();
   makeBarsScrollable();
-  const wrap = document.getElementById('results-wrap');
-  /* الواجهة الافتراضية صارت ماسح العقود — عشرات العقود بدل عقد واحد للسهم */
-  const cbar = document.getElementById('optc-bar');
-  const cpanel = document.getElementById('optc-panel');
-  if (cbar) cbar.style.display = 'flex';
-  if (cpanel) cpanel.style.display = 'block';
-  const bar = document.getElementById('opt-bar');
-  const panel = document.getElementById('opt-panel');
-  if (bar) bar.style.display = 'none';
-  if (panel) panel.style.display = 'none';
-  if (wrap) wrap.style.display = 'none';
+  applyTabChrome('options');
   optRenderContracts();
 }
 
 /** يعيد إظهار جدول النتائج عند مغادرة تبويب الأوبشن. */
-function optLeaveTab() {
-  ['opt-bar', 'opt-panel', 'optc-bar', 'optc-panel'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.style.display = 'none';
-  });
-  const wrap = document.getElementById('results-wrap');
-  if (wrap) wrap.style.display = '';
-}
+/** مُبقاة للتوافق — عزل التبويبات صار مسؤولية applyTabChrome وحدها. */
+function optLeaveTab() { applyTabChrome(_filter); }
 
 /** عدد الأسهم التي ما زالت على بيانات تجريبية — يُعرض في شريط الحالة. */
 function demoCount(){return G.demo.size;}
@@ -3421,20 +3412,51 @@ function setFilter(f,el){
   if(f==='whale'){_sortCol='sb_s';_sortDir=-1;}
   if(f==='radar'){_sortCol='radar_rank';_sortDir=-1;}/* بالمصدر الأقوى لا بالأقرب تاريخاً */
   if(f==='spectral'){_sortCol='spectral_edge';_sortDir=-1;}
-  const ddBar=document.getElementById('dd-bar');
-  if(ddBar)ddBar.style.display=(f==='decision')?'flex':'none';
+  /* ══ عزل التبويبات ══
+     كانت كل قطعة واجهة تُخفى وتُظهر من مكان مختلف: شريط غرفة القرار من
+     هنا، وشريط الأوبشن من renderOptionsTab، وإخفاؤه من optLeaveTab،
+     والملخّص من renderResults. ومتى خرجت الدالة مبكراً (return) بقيت
+     البقية على حالها. النتيجة صفحة واحدة متداخلة.
+     الآن: مُتحكّم واحد يُخفي كل شيء ثم يُظهر ما يخصّ التبويب الحالي
+     وحده — ويُستدعى قبل أي return. */
+  applyTabChrome(f);
+
   if(f==='decision'){_sortCol='dd';_sortDir=-1;if(!DD.ran&&_advData.length)ddRun();}
-  const scanBar=document.getElementById('spectral-scan-bar');
-  if(scanBar)scanBar.style.display=(f==='spectral')?'flex':'none';
-  const radarBar=document.getElementById('radar-bar');
-  if(radarBar)radarBar.style.display=(f==='radar')?'flex':'none';
-  if(typeof makeBarsScrollable==='function')makeBarsScrollable();
   /* الرادار يُحسب عند فتح تبويبه لا داخل المسح الشامل، فلا يبطّئه */
   if(f==='radar'&&!RADAR.ran&&!RADAR.busy){renderResults();radarCompute(false);return;}
-  if(f==='options'){renderOptionsTab();return;}
-  if(typeof optLeaveTab==='function')optLeaveTab();
+  if(f==='options'){optEnsureDom();makeBarsScrollable();applyTabChrome(f);optRenderContracts();return;}
   renderResults();
 }
+
+/* كل قطع الواجهة الخاصة بتبويب بعينه — تُخفى جميعاً ثم يُظهر التبويب ما يخصّه. */
+const TAB_CHROME = {
+  decision: ['dd-bar', 'dd-summary'],
+  radar:    ['radar-bar'],
+  spectral: ['spectral-scan-bar'],
+  options:  ['optc-bar', 'optc-panel']
+};
+const ALL_CHROME = ['dd-bar', 'dd-summary', 'radar-bar', 'spectral-scan-bar',
+                    'opt-bar', 'opt-panel', 'optc-bar', 'optc-panel'];
+
+function applyTabChrome(f) {
+  ALL_CHROME.forEach(id => {
+    const e = document.getElementById(id);
+    if (e) { e.style.display = 'none'; e.removeAttribute('hidden'); }
+  });
+  const wrap = document.getElementById('results-wrap');
+  /* تبويب الأوبشن له لوحته الخاصة، فيُخفى جدول النتائج العام */
+  if (wrap) wrap.style.display = (f === 'options') ? 'none' : '';
+
+  (TAB_CHROME[f] || []).forEach(id => {
+    const e = document.getElementById(id);
+    if (!e) return;
+    if (id === 'optc-panel') e.style.display = 'block';
+    else if (id === 'dd-summary') e.style.display = (DD.ran && (DD.results || []).length) ? 'block' : 'none';
+    else e.style.display = 'flex';
+  });
+  if (typeof makeBarsScrollable === 'function') makeBarsScrollable();
+}
+window.applyTabChrome = applyTabChrome;
 function toggleBuySell(type,btn){
   if(type==='buy'){_buyOnly=!_buyOnly;_sellOnly=false;btn.classList.toggle('on',_buyOnly);document.getElementById('btn-sell').classList.remove('on');}
   else{_sellOnly=!_sellOnly;_buyOnly=false;btn.classList.toggle('on',_sellOnly);document.getElementById('btn-buy').classList.remove('on');}
@@ -3565,8 +3587,6 @@ function renderResults(){
      لا تحتوي masterScore/tat/snp/... الخ). فرع منفصل بالكامل. */
   /* 🧭 غرفة القرار — مسار بيانات مستقل (DD.results) مبني فوق _advData
      لكن بشكل مختلف تماماً: صفوفه قرارات لا قياسات. */
-  const _sm=document.getElementById('dd-summary');
-  if(_sm&&_filter!=='decision')_sm.style.display='none';
   if(_filter==='decision'){ddRenderTable2();return;}
   if(_filter==='radar'){radarRenderTable();return;}
 
@@ -7576,7 +7596,7 @@ function ddSummaryBar() {
     wrap.parentElement.insertBefore(el, wrap);
   }
   const rs = (DD.results || []);
-  if (!DD.ran || !rs.length) { el.style.display = 'none'; return; }
+  if (!DD.ran || !rs.length || _filter !== 'decision') { el.style.display = 'none'; return; }
   el.style.display = 'block';
 
   const buy = rs.filter(r => r.action === 'buy');
