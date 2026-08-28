@@ -275,6 +275,45 @@ body{height:100%;background:var(--c0);color:var(--t1);font-family:'IBM Plex Sans
 .ib-ch-h{position:absolute;top:0;left:0;right:0;z-index:10;padding:5px 10px;display:flex;align-items:center;gap:8px;background:linear-gradient(180deg,rgba(4,6,14,.95),rgba(4,6,14,.5),transparent);pointer-events:none}.ib-ch-h>*{pointer-events:auto}
 .ib-prog{display:none;padding:7px 12px;background:var(--c2)}.ib-prog.show{display:flex;align-items:center;gap:8px}.ib-pg-b{flex:1;height:5px;background:var(--c3);border-radius:3px;overflow:hidden}.ib-pg-f{height:100%;background:linear-gradient(90deg,#FFD700,var(--up));border-radius:3px;transition:width .15s}.ib-pg-t{font-size:9px;color:var(--t2);white-space:nowrap}
 .ib-empty{padding:30px;text-align:center;color:var(--t3)}.ib-empty-i{font-size:36px;margin-bottom:8px;opacity:.5}
+
+/* ══════════════════════════════════════════════════════════════════════
+   📱 حرية الحركة على الشاشة الصغيرة
+   ──────────────────────────────────────────────────────────────────────
+   كل أشرطة التحكم كانت flex-wrap:wrap، فتنكسر على الجوال إلى أربعة
+   صفوف متلاصقة تبتلع نصف الشاشة قبل أن يرى المستخدم صفاً واحداً من
+   النتائج. والأزرار بارتفاع 22px تحت عتبة اللمس المريح (44px).
+   الحل: شريط واحد يُمرَّر أفقياً بالإصبع، وأزرار بحجم يُلمس، وزرّ طيّ
+   يخفي الشريط كله متى أراد المستخدم الشاشة للنتائج.
+   ══════════════════════════════════════════════════════════════════════ */
+.hbar{
+  display:flex !important; flex-wrap:nowrap !important;
+  overflow-x:auto; overflow-y:hidden; -webkit-overflow-scrolling:touch;
+  scrollbar-width:thin; scroll-snap-type:x proximity;
+}
+.hbar::-webkit-scrollbar{height:4px}
+.hbar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.18);border-radius:3px}
+.hbar > *{flex:0 0 auto; scroll-snap-align:start}
+.hbar.collapsed{display:none !important}
+.bar-toggle{
+  position:sticky; inset-inline-start:0; z-index:3;
+  background:var(--c3); border:1px solid var(--bd2); color:var(--t2);
+  border-radius:6px; padding:6px 9px; font-size:13px; cursor:pointer;
+  font-family:inherit; line-height:1;
+}
+@media (max-width:760px){
+  .hbar{gap:7px !important; padding:8px 10px !important}
+  .hbar button, .hbar select, .hbar input{
+    min-height:36px !important; font-size:12px !important; padding:7px 12px !important;
+  }
+  .hbar .scan-btn{font-weight:700}
+  /* مجموعات مترابطة تبقى معاً عند التمرير */
+  .hgroup{display:flex; align-items:center; gap:6px;
+    background:rgba(255,255,255,.03); border:1px solid var(--bd2);
+    border-radius:8px; padding:4px 8px}
+  .hgroup > span{white-space:nowrap; font-size:10.5px; color:var(--t3)}
+}
+.hgroup{display:flex; align-items:center; gap:6px}
+
 </style>
 </head>
 <body>
@@ -1353,14 +1392,14 @@ function optEnsureDom() {
   cbar.innerHTML = `
     <button onclick="optScanContracts()" class="scan-btn" style="background:rgba(255,215,0,.16);border:1px solid rgba(255,215,0,.45);color:#FFD700;flex-shrink:0;font-weight:700">🎟️ امسح كل العقود</button>
     <button onclick="optcStop()" class="scan-btn" style="background:rgba(240,68,88,.1);border:1px solid rgba(240,68,88,.3);color:#f04458;flex-shrink:0">⏹</button>
-    <span style="font-size:10px;color:var(--t3)">💵 ميزانية العقد:</span>
-    <input id="optc-budget" type="number" value="400" step="50" min="20"
-      oninput="optcSet('budget',+this.value||350)"
-      style="width:72px;background:var(--c3);border:1px solid rgba(255,215,0,.35);color:#FFD700;border-radius:4px;padding:3px 6px;font-size:11px;font-weight:700;font-family:'IBM Plex Mono',monospace">
-    <span style="font-size:10px;color:var(--t3)">$ · سيولة ≥</span>
-    <input id="optc-oi" type="number" value="200" step="50" min="0"
-      oninput="optcSet('minOI',+this.value||0)"
-      style="width:60px;background:var(--c3);border:1px solid var(--bd2);color:var(--t1);border-radius:4px;padding:3px 6px;font-size:11px;font-family:'IBM Plex Mono',monospace">
+    <span class="hgroup"><span>💵 ميزانية العقد $</span>
+      <input id="optc-budget" type="number" value="1200" step="50" min="20" dir="ltr"
+        oninput="optcSet('budget',+this.value||1200)"
+        style="width:78px;background:var(--c3);border:1px solid rgba(255,215,0,.35);color:#FFD700;border-radius:4px;padding:4px 7px;font-size:12px;font-weight:700;font-family:'IBM Plex Mono',monospace;text-align:center"></span>
+    <span class="hgroup"><span>🧊 سيولة ≥</span>
+      <input id="optc-oi" type="number" value="50" step="25" min="0" dir="ltr"
+        oninput="optcSet('minOI',+this.value||0)"
+        style="width:64px;background:var(--c3);border:1px solid var(--bd2);color:var(--t1);border-radius:4px;padding:4px 7px;font-size:12px;font-family:'IBM Plex Mono',monospace;text-align:center"></span>
     <div style="display:flex;gap:0;border:1px solid var(--bd2);border-radius:5px;overflow:hidden;flex-shrink:0">
       <button class="optc-s" onclick="optcSort('best',this)" style="padding:4px 10px;font-size:10px;font-family:inherit;border:none;border-left:1px solid var(--bd2);background:rgba(255,215,0,.18);color:#FFD700;cursor:pointer">الأفضل</button>
       <button class="optc-s" onclick="optcSort('volume',this)" style="padding:4px 10px;font-size:10px;font-family:inherit;border:none;border-left:1px solid var(--bd2);background:transparent;color:var(--t2);cursor:pointer">🔥 الأكثر تداولاً</button>
@@ -1586,6 +1625,7 @@ function optCell(label, val, color) {
 
 function renderOptionsTab() {
   optEnsureDom();
+  makeBarsScrollable();
   const wrap = document.getElementById('results-wrap');
   /* الواجهة الافتراضية صارت ماسح العقود — عشرات العقود بدل عقد واحد للسهم */
   const cbar = document.getElementById('optc-bar');
@@ -3388,6 +3428,7 @@ function setFilter(f,el){
   if(scanBar)scanBar.style.display=(f==='spectral')?'flex':'none';
   const radarBar=document.getElementById('radar-bar');
   if(radarBar)radarBar.style.display=(f==='radar')?'flex':'none';
+  if(typeof makeBarsScrollable==='function')makeBarsScrollable();
   /* الرادار يُحسب عند فتح تبويبه لا داخل المسح الشامل، فلا يبطّئه */
   if(f==='radar'&&!RADAR.ran&&!RADAR.busy){renderResults();radarCompute(false);return;}
   if(f==='options'){renderOptionsTab();return;}
@@ -3524,6 +3565,8 @@ function renderResults(){
      لا تحتوي masterScore/tat/snp/... الخ). فرع منفصل بالكامل. */
   /* 🧭 غرفة القرار — مسار بيانات مستقل (DD.results) مبني فوق _advData
      لكن بشكل مختلف تماماً: صفوفه قرارات لا قياسات. */
+  const _sm=document.getElementById('dd-summary');
+  if(_sm&&_filter!=='decision')_sm.style.display='none';
   if(_filter==='decision'){ddRenderTable2();return;}
   if(_filter==='radar'){radarRenderTable();return;}
 
@@ -7518,8 +7561,57 @@ window.ddSetMode = ddSetMode;
 /* ══════════════════════════════════════════════════════════════════════
    🎨 جدول القرارات — نسخة ٢ (هدف الفراكتال + الجاهزية + النافذة الزمنية)
    ══════════════════════════════════════════════════════════════════════ */
+/** شريط «ماذا أفعل الآن؟» فوق جدول غرفة القرار.
+ *  الشكوى كانت أن الغرفة «غير واضحة»، وهي فعلاً كانت خمسة عشر عموداً من
+ *  الأرقام بلا جملة واحدة تقول للمستخدم ماذا يفعل. هذا يجيب السؤال
+ *  الوحيد الذي يُفتح التبويب لأجله. */
+function ddSummaryBar() {
+  let el = document.getElementById('dd-summary');
+  if (!el) {
+    const wrap = document.getElementById('results-wrap');
+    if (!wrap || !wrap.parentElement) return;
+    el = document.createElement('div');
+    el.id = 'dd-summary';
+    el.style.cssText = 'padding:11px 13px;border-bottom:1px solid var(--bd);background:linear-gradient(135deg,rgba(14,207,126,.06),rgba(74,158,255,.03));font-size:12px;line-height:1.95';
+    wrap.parentElement.insertBefore(el, wrap);
+  }
+  const rs = (DD.results || []);
+  if (!DD.ran || !rs.length) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+
+  const buy = rs.filter(r => r.action === 'buy');
+  const half = rs.filter(r => r.action === 'buy_half');
+  const wait = rs.filter(r => r.action === 'wait' || r.action === 'buy_stop');
+  const watch = rs.filter(r => r.action === 'watch');
+  const best = [...rs].sort((a, b) => (b.rr || 0) - (a.rr || 0))[0];
+
+  const chip = (n, label, col, list) => n
+    ? `<span style="display:inline-block;background:${col}1e;border:1px solid ${col}55;color:${col};border-radius:6px;padding:3px 10px;margin:2px 3px;font-weight:700;font-size:11.5px" title="${list.map(r => r.sym).join('، ')}">${label}: ${n}</span>` : '';
+
+  el.innerHTML = `
+    <div style="font-weight:800;color:#0ecf7e;margin-bottom:5px">🧭 ماذا أفعل الآن؟</div>
+    <div style="margin-bottom:6px">
+      ${chip(buy.length, 'نفّذ الآن', '#0ecf7e', buy)}
+      ${chip(half.length, 'نصف مركز', '#f5c842', half)}
+      ${chip(wait.length, 'أمر موقوف / انتظار سعر', '#4a9eff', wait)}
+      ${chip(watch.length, 'مراقبة فقط', '#7a8ba8', watch)}
+    </div>
+    ${best ? `<div style="color:#c8d0e0">
+      <b>أعلى عائد مقابل المخاطرة:</b> <b style="color:var(--bl)">${best.sym}</b> —
+      ادخل عند <b style="color:#FFD700">${best.execPrice}$</b>،
+      الوقف <b style="color:#f04458">${best.ep.stop}$</b>،
+      الهدف <b style="color:#0ecf7e">${best.finalTarget}$</b>
+      (عائد <b>${best.rr}R</b>${best.ep.chaseCap ? ` · لا تشترِ فوق <b style="color:#fb923c">${best.ep.chaseCap}$</b>` : ''}).
+    </div>` : ''}
+    <div style="margin-top:5px;font-size:11px;color:var(--t3)">
+      اضغط أي صف لفتح شارت السهم · وزر «📋 تقرير» يعطيك الأسباب والبوابات كاملة.
+      ${DD.regime ? `حالة السوق: <b style="color:var(--t2)">${DD.regime.label}</b>.` : ''}
+    </div>`;
+}
+
 function ddRenderTable2() {
   const body = document.getElementById('rtbody');
+  ddSummaryBar();
   if (!DD.ran) {
     body.innerHTML = `<tr><td colspan="15" style="padding:26px;text-align:center;color:var(--t3);line-height:2">
       ① شغّل «🔬 مسح شامل» · ② اضغط «🧭 احسب القرارات» أعلاه.<br>
@@ -7823,9 +7915,12 @@ window.ddReport = ddReport2;
 
 const OPTC = {
   rows: [], busy: false, cancel: false, ran: false,
-  budget: 400,          /* أقصى تكلفة للعقد الواحد بالدولار (العلاوة × 100) */
-  minOI: 200,
-  maxSpread: 12,
+  /* العتبات كانت مضبوطة على سوق أرخص. SPY عند 771$ يجعل عقده القريب من
+     النقد بين 800$ و2000$، فميزانية 400$ تُفرغ السلسلة كلها. والفائدة
+     المفتوحة 200 عقد عتبة معقولة على SPY وقاسية على أغلب الأسهم. */
+  budget: 1200,         /* أقصى تكلفة للعقد الواحد بالدولار (العلاوة × 100) */
+  minOI: 50,
+  maxSpread: 20,
   poolPerSym: 10,       /* كم عقداً يُحتفظ به لكل رمز قبل ترشيح الميزانية */
   perSym: 4,            /* أقصى ما يُعرض من رمز واحد حتى لا يبتلع سهم الجدول */
   minRows: 30,          /* الحد الأدنى المطلوب من الصفوف قبل توسيع السقف */
@@ -8057,6 +8152,19 @@ async function optScanContracts() {
     if (i % 3 === 2) { OPTC.rows = rows.slice(); optRenderContracts(); }
   }
 
+  /* ── ترخية تلقائية ──
+     جدول فارغ بلا سبب هو أسوأ مخرَج ممكن: يفهمه المستخدم على أنه «لا
+     فرص»، والحقيقة غالباً أن عتبة داخلية ابتلعت كل شيء. إن خرج المجمّع
+     فارغاً تُرخى العتبات مرة واحدة تلقائياً ويُقال ذلك صراحةً. */
+  if (!rows.length && !OPTC.cancel && OPTC.minOI > 10) {
+    OPTC.relaxed = { oi: OPTC.minOI, sp: OPTC.maxSpread };
+    OPTC.minOI = 10; OPTC.maxSpread = 35;
+    const el1 = document.getElementById('optc-oi'); if (el1) el1.value = 10;
+    _radarProgOptc('لا عقد اجتاز العتبات — يُعاد المسح بعتبات مُرخاة تلقائياً…');
+    OPTC.busy = false;
+    return optScanContracts(false);
+  }
+
   OPTC.rows = rows;
   OPTC.ran = true; OPTC.busy = false;
   OPTC.lastAt = new Date();
@@ -8064,6 +8172,7 @@ async function optScanContracts() {
   optRenderContracts();
 }
 
+function _radarProgOptc(t) { const e = document.getElementById('optc-prog'); if (e) e.innerHTML = t; }
 function optcStop() { OPTC.cancel = true; }
 function optcSet(k, v) {
   OPTC[k] = v;
@@ -8141,7 +8250,7 @@ function optRenderContracts() {
     </div>` : '';
 
   const stLine = st ? `<div style="margin-top:12px;font-size:11px;color:var(--t2);line-height:1.95;text-align:right;max-width:560px;margin-inline:auto;background:var(--c2);border:1px solid var(--bd);border-radius:8px;padding:10px 13px">
-      <b style="color:#FFD700">أين ذهبت العقود؟</b> فُحص <b>${st.seen}</b> عقداً:
+      <b style="color:#FFD700">أين ذهبت العقود؟</b> فُحص <b>${st.seen}</b> عقداً${st.seen === 0 ? ' — <span style="color:#f04458">أي أن السلاسل لم تصل أصلاً، فالمشكلة في الجلب لا في الترشيح</span>' : ''}:
       <div style="margin-top:5px">• <b>${st.thinOI}</b> بفائدة مفتوحة دون ${OPTC.minOI}</div>
       <div>• <b>${st.wideSpread}</b> بفارق عرض/طلب فوق ${OPTC.maxSpread}٪</div>
       <div>• <b>${st.worthless}</b> ينتهي بلا قيمة عند هدف السهم (بعيد عن النقد)</div>
@@ -8158,6 +8267,7 @@ function optRenderContracts() {
         : 'اضغط <b style="color:#FFD700">«🎟️ امسح كل العقود»</b> أعلاه.'}
       ${ladderLine}
       ${stLine}
+      ${optcErrLine()}
     </div>`;
     return;
   }
@@ -8218,8 +8328,52 @@ function optRenderContracts() {
       }).join('')}</tbody>
     </table></div>
     ${ladderLine}
-    ${stLine}`;
+    ${stLine}
+    ${optcErrLine()}`;
 }
+
+/** أسباب فشل الرموز — كانت تُجمع في OPT.errors ولا تُعرض في هذه اللوحة
+ *  إطلاقاً، فيظهر «0 عقد» بلا أي تفسير حتى لو كانت نقطة النهاية نفسها
+ *  معطّلة على الخادم. وهذا بالضبط ما يجعل التبويب يبدو معطوباً. */
+function optcErrLine() {
+  const errs = Object.entries(OPT.errors || {});
+  if (!errs.length) return '';
+  const groups = {};
+  errs.forEach(([sym, why]) => { (groups[why] = groups[why] || []).push(sym); });
+  return `<div style="margin-top:11px;background:rgba(240,68,88,.06);border:1px solid rgba(240,68,88,.25);border-radius:8px;padding:11px 13px;text-align:right;max-width:640px;margin-inline:auto">
+    <div style="font-size:12px;font-weight:800;color:#f04458;margin-bottom:7px">⚠️ ${errs.length} رمزاً لم تُجلب سلسلته — والسبب صريح:</div>
+    ${Object.entries(groups).map(([why, syms]) => `<div style="font-size:11.5px;color:var(--t2);line-height:1.9;margin-bottom:4px">
+      <b style="color:#f5c842">${syms.length} رمز</b> (${syms.slice(0, 8).join('، ')}${syms.length > 8 ? '…' : ''}): ${why}</div>`).join('')}
+    <div style="margin-top:7px;font-size:11px;color:var(--t3);line-height:1.85">
+      إن تكرّر السبب نفسه على كل الرموز فالمشكلة في نقطة النهاية <code style="color:#22d3ee">/api/options</code> على الخادم لا في المنصة —
+      تحقّق أنها منشورة وتقبل <code style="color:#22d3ee">?symbol=</code> و<code style="color:#22d3ee">&date=</code>.
+    </div>
+  </div>`;
+}
+
+
+/* يحوّل أشرطة التحكم إلى شريط واحد قابل للتمرير الأفقي مع زر طيّ. */
+function makeBarsScrollable() {
+  ['optc-bar', 'opt-bar', 'radar-bar', 'spectral-scan-bar', 'dd-bar'].forEach(id => {
+    const b = document.getElementById(id);
+    if (!b || b.dataset.hbar) return;
+    b.dataset.hbar = '1';
+    b.classList.add('hbar');
+    const t = document.createElement('button');
+    t.className = 'bar-toggle';
+    t.textContent = '⇔';
+    t.title = 'اطوِ الشريط لتوسيع مساحة النتائج';
+    t.onclick = (e) => {
+      e.stopPropagation();
+      const kids = [...b.children].filter(c => c !== t);
+      const hidden = kids[0] && kids[0].style.display === 'none';
+      kids.forEach(c => c.style.display = hidden ? '' : 'none');
+      t.textContent = hidden ? '⇔' : '⇕';
+    };
+    b.insertBefore(t, b.firstChild);
+  });
+}
+window.makeBarsScrollable = makeBarsScrollable;
 
 window.optScanContracts = optScanContracts;
 window.optRenderContracts = optRenderContracts;
