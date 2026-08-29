@@ -3588,6 +3588,12 @@ function renderResults(){
   /* 🧭 غرفة القرار — مسار بيانات مستقل (DD.results) مبني فوق _advData
      لكن بشكل مختلف تماماً: صفوفه قرارات لا قياسات. */
   if(_filter==='decision'){ddRenderTable2();return;}
+  /* حارس دفاعي: applyTabChrome هو المسؤول الأساسي عن إخفاء ملخّص القرار
+     عند تبديل التبويب، لكن أي استدعاء مباشر لـ renderResults() (تحديث
+     بيانات، مؤقّت، إلخ) بمعزل عن setFilter لا يمرّ به — فيبقى الملخّص
+     ظاهراً من زيارة سابقة لتبويب القرار. هذا يضمن الإخفاء دائماً. */
+  const _sm2=document.getElementById('dd-summary');
+  if(_sm2)_sm2.style.display='none';
   if(_filter==='radar'){radarRenderTable();return;}
 
   if(_filter==='spectral'){
@@ -7941,9 +7947,10 @@ const OPTC = {
   budget: 1200,         /* أقصى تكلفة للعقد الواحد بالدولار (العلاوة × 100) */
   minOI: 50,
   maxSpread: 20,
-  poolPerSym: 10,       /* كم عقداً يُحتفظ به لكل رمز قبل ترشيح الميزانية */
-  perSym: 4,            /* أقصى ما يُعرض من رمز واحد حتى لا يبتلع سهم الجدول */
-  minRows: 30,          /* الحد الأدنى المطلوب من الصفوف قبل توسيع السقف */
+  poolPerSym: 8,        /* عقود تُحتفظ بها لكل رمز داخلياً — للبدائل في بطاقة التفصيل فقط */
+  perSym: 1,            /* 🔒 عقد واحد لكل رمز في الجدول — الأقوى فقط، لا تكرار */
+  minRows: 30,          /* هدف إرشادي فقط — لا يُكسر عبر تكرار سهم */
+  detail: null,         /* الرمز المفتوحة تفاصيله حالياً، إن وُجد */
   sort: 'best',         /* best | volume | cheap | prob */
   onlyAligned: false,   /* العقود المتوافقة مع الشارت فقط */
   lastAt: null
@@ -8219,10 +8226,99 @@ function optcToggleAligned(el) {
 function optcOpenChart(sym, strike, type) {
   selectStock(sym);
   OPTC.focus = `${sym}|${strike}|${type}`;
+  OPTC.detail = sym;
   const rp = document.querySelector('.right-panel');
   if (rp && typeof rp.scrollIntoView === 'function') rp.scrollIntoView({ behavior: 'smooth', block: 'start' });
   optRenderContracts();
 }
+
+/** بطاقة تفصيل غنية أسفل الجدول — نفس مستوى التفصيل الذي كان في
+ *  optShowDetail (النظام القديم) لكن مطبَّقاً على عقد الماسح الجديد:
+ *  أسباب التوافق مع الشارت، تحليل زمني كامل، الإغريق والتذبذب، ومن
+ *  أين جاء الوقف والهدف — إضافة إلى «خيارات أخرى» لنفس السهم لمن أراد
+ *  استرايكاً أو استحقاقاً مختلفاً بدل الأقوى المختار تلقائياً. */
+function optcRenderDetail(sym) {
+  const box = document.getElementById('optc-detail');
+  if (!box) return;
+  const r = OPTC.rows.filter(x => x.sym === sym).sort((a, b) => b.score - a.score)[0];
+  if (!r) { box.innerHTML = ''; return; }
+
+  const col = r.score >= 70 ? '#0ecf7e' : r.score >= 50 ? '#f5c842' : '#7a8ba8';
+  const S = 'background:var(--c2);border:1px solid var(--bd);border-radius:9px;padding:12px 14px;margin-bottom:10px';
+  const R = 'font-size:11.5px;line-height:2;color:var(--t2)';
+
+  /* بدائل من نفس السهم — كانت مُستبعدة تماماً من العرض بعد فرض عقد
+     واحد لكل سهم في الجدول، فتُعرض هنا كخيارات إن أراد المستخدم استرايكاً
+     أو استحقاقاً غير الذي اختاره التقييم تلقائياً. */
+  const alts = OPTC.rows
+    .filter(x => x.sym === sym && !(x.strike === r.strike && x.expiryTs === r.expiryTs))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+
+  box.innerHTML = `
+    ${timeActivationCard(sym, true)}
+
+    <div style="${S};border-color:${col}55;background:linear-gradient(135deg,${col}0d,transparent)">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+        <b style="font-size:15px">${sym} ${r.type === 'call' ? 'كول' : 'بوت'} ${optNum(r.strike)}</b>
+        <span style="font-size:11px;color:var(--t3)">استحقاق ${r.expiry} · ${r.sessions} جلسة</span>
+        <span style="background:${col}22;color:${col};border:1px solid ${col}55;border-radius:6px;padding:4px 12px;font-size:12px;font-weight:700">التقييم ${r.score}/100</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-top:6px">
+        ${optCell('الدخول', `${optNum(r.entry)}$`, '#FFD700')}
+        ${optCell('الوقف', `${optNum(r.stop)}$`, '#f04458')}
+        ${optCell('الهدف', `${optNum(r.target)}$`, '#0ecf7e')}
+        ${optCell('عائد/مخاطرة', optNum(r.rr, 1), r.rr >= 2 ? '#0ecf7e' : '#f5c842')}
+        ${optCell('الكلفة/عقد', `${r.costUsd}$`, 'var(--t1)')}
+        ${optCell('داخل النقد', `${r.probITM ?? '—'}٪`, (r.probITM ?? 0) >= 40 ? '#0ecf7e' : '#f5c842')}
+      </div>
+    </div>
+
+    <div style="${S}">
+      <div style="font-weight:700;margin-bottom:5px;font-size:12px">📊 لماذا هذا العقد تحديداً؟ — التحليل الفني والزمني</div>
+      <div style="${R}">
+        اتجاه السهم <b>${r.fit.dirUp ? 'صاعد' : r.fit.dirUp === false ? 'هابط' : 'غير محسوم'}</b>
+        بإجماع <b>${r.fit.agreement ?? '—'}٪</b>. ${r.fit.why.map(w => `• ${w}`).join('<br>')}<br>
+        ${r.turnBars != null
+          ? `الانعطاف الزمني المتوقع بعد <b>${r.turnBars}</b> جلسة، والعقد يعيش <b>${r.sessions}</b> جلسة ⇒
+             ${r.timingFits ? '<span style="color:#0ecf7e">الوقت في صفّك — العقد يبقى بعد الحركة</span>' : '<span style="color:#f04458">تحذير: الانعطاف عند الاستحقاق أو بعده — قد تخرج قبل الحركة</span>'}`
+          : 'لا دورة زمنية دالة إحصائياً على هذا السهم — التوقيت هنا من البنية السعرية وحدها.'}
+      </div>
+    </div>
+
+    <div style="${S}">
+      <div style="font-weight:700;margin-bottom:5px;font-size:12px">📐 من أين جاء الوقف والهدف؟ — الجانب المالي</div>
+      <div style="${R}">
+        هدف السهم <b>${optNum(r.uTarget)}$</b> (${r.targetSrcLbl}) · وقف السهم <b style="color:#f04458">${optNum(r.uStop)}$</b><br>
+        العقد سُعِّر عند بلوغ هذين المستويين بإعادة تسعير بلاك-شولز بعد حمل <b>${r.holdSess}</b> جلسة، لا بنسبة ثابتة من العلاوة.<br>
+        نقطة التعادل <b>${optNum(r.breakeven)}$</b> (حركة <b>${r.beMovePct}٪</b>) مقابل الحركة التي يسعّرها السوق حتى الاستحقاق —
+        النسبة <b>${r.beVsEm != null ? '×' + r.beVsEm : '—'}</b> ${(r.beVsEm ?? 9) <= 1 ? '<span style="color:#0ecf7e">(التعادل أقرب من الحركة المتوقعة)</span>' : '<span style="color:#f5c842">(التعادل يحتاج حركة أكبر من المعتاد)</span>'}
+      </div>
+    </div>
+
+    <div style="${S}">
+      <div style="font-weight:700;margin-bottom:5px;font-size:12px">🎚 الإغريق والتذبذب والسيولة</div>
+      <div style="${R}">
+        دلتا <b>${optNum(r.delta, 3)}</b> · ثيتا <b style="color:#f04458">${optNum(r.theta, 3)}$</b>/يوم<br>
+        التذبذب الضمني <b>${optNum(r.iv, 1)}٪</b> مقابل المحقّق ⇒ النسبة IV/HV <b>${r.ivHv ?? '—'}</b><br>
+        السيولة: فارق <b>${optNum(r.spreadPct, 1)}٪</b> · فائدة مفتوحة <b>${(r.oi || 0).toLocaleString('en')}</b> · حجم اليوم <b>${(r.volume || 0).toLocaleString('en')}</b>
+      </div>
+    </div>
+
+    ${alts.length ? `<div style="${S}">
+      <div style="font-weight:700;margin-bottom:6px;font-size:12px">🔀 خيارات أخرى على نفس السهم</div>
+      <div style="${R}">${alts.map(a =>
+        `سترايك <b>${optNum(a.strike)}</b> · استحقاق ${a.expiry} (${a.sessions}ج) · دخول ${optNum(a.entry)}$ ·
+         هدف ${optNum(a.target)}$ · وقف ${optNum(a.stop)}$ · ع/م ${optNum(a.rr, 1)} · تقييم ${a.score}
+         <span style="color:var(--t3)">— لم يُختر لأنه أضعف من الأول${a.score < r.score - 15 ? ' بفارق واضح' : ''}</span>`
+      ).join('<br>')}</div>
+    </div>` : ''}
+
+    <div style="font-size:10.5px;color:var(--t3);line-height:1.9;padding:0 4px">
+      ⚠️ الأسعار من مصدر مجاني قد يتأخّر ١٥ دقيقة. تحقّق من السعر في منصة التنفيذ قبل الإرسال، واستخدم أمراً حدّياً لا سوقياً.
+    </div>`;
+}
+window.optcRenderDetail = optcRenderDetail;
 
 function optRenderContracts() {
   optEnsureDom();
@@ -8238,9 +8334,14 @@ function optRenderContracts() {
   /* سقف لكل رمز حتى لا يبتلع سهم واحد الجدول — ويُرفع تلقائياً إن لم
      تبلغ الصفوف الحد الأدنى، لأن جدولاً قصيراً بسبب سقف داخلي يُقرأ
      خطأً على أنه «لا فرص في السوق». */
+  /* 🛠️ كان الجدول يرفع سقف الرمز الواحد تلقائياً حين تقلّ الصفوف عن
+     الحد الأدنى — فيظهر لسهم واحد (مثل AAPL) خمسة عقود بينما رموز أخرى
+     غائبة كلياً. وهذا عكس ما يحتاجه من يريد الشراء: قرار واحد لكل سهم،
+     لا قائمة بدائل يتوه بينها. السقف الآن ثابت عند عقد واحد لكل رمز —
+     الأقوى فقط بحسب التقييم المركّب (فني + زمني + مالي) — ولا يُرفع مهما
+     قلّت الصفوف. القصور يُعالَج بترخية العتبات لا بتكرار الأسهم. */
   const capBy = (cap) => { const c = {}; return inBudget.filter(r => (c[r.sym] = (c[r.sym] || 0) + 1) <= cap); };
   let rows = capBy(OPTC.perSym);
-  if (rows.length < OPTC.minRows) rows = capBy(OPTC.poolPerSym);
 
   /* سُلَّم الميزانية: كم عقداً يفتحه كل مستوى إنفاق */
   const ladder = [150, 250, 400, 600, 900, 1500]
@@ -8297,9 +8398,12 @@ function optRenderContracts() {
 
   panel.innerHTML = `
     <div style="background:rgba(255,215,0,.05);border:1px solid rgba(255,215,0,.22);border-radius:9px;padding:10px 13px;margin-bottom:11px;font-size:11px;line-height:1.9;color:var(--t2)">
-      <b style="color:#FFD700">${rows.length} عقد</b> من ${new Set(rows.map(r => r.sym)).size} سهماً
-      — ضمن ميزانية <b style="color:#FFD700">${OPTC.budget}$</b> من أصل ${pool.length} عقداً اجتاز السيولة والعائد.
-      اضغط أي صف ليفتح <b>شارت السهم الأساسي</b> في اللوحة المجاورة.
+      <b style="color:#FFD700">${rows.length} عقد</b> — عقد واحد لكل سهم، الأقوى فقط، من ${pool.length} عقداً اجتاز السيولة والعائد
+      ضمن ميزانية <b style="color:#FFD700">${OPTC.budget}$</b>.
+      اضغط أي صف ليفتح <b>شارت السهم</b> في اللوحة المجاورة و<b>بطاقة التفصيل</b> أسفل الجدول.
+      <br><b style="color:#FFD700">«التقييم»</b> رقم واحد يجمع ثلاثة أبعاد: <b>الفني</b> (الاتجاه ومستويات الدخول/الهدف من الشارت)،
+      <b>الزمني</b> (هل الانعطاف المتوقع يقع قبل انتهاء العقد أم بعده)، و<b>المالي</b> (تكلفة العقد وسيولته وتسعير تذبذبه) —
+      فالعقد المعروض لكل سهم هو الأقوى على هذه الأبعاد الثلاثة معاً، لا الأرخص ولا الأقرب فقط.
       <br><b style="color:#FFD700">«الكلفة»</b> هي ما تدفعه فعلاً للعقد الواحد (العلاوة × ١٠٠).
       و<b style="color:#FFD700">«الهدف/الوقف»</b> إعادة تسعير للعقد نفسه عند هدف السهم ووقفه البنيويين مع خصم التآكل الزمني —
       لا نسبة مفروضة من العلاوة.
@@ -8347,9 +8451,16 @@ function optRenderContracts() {
         </tr>`;
       }).join('')}</tbody>
     </table></div>
+    <div id="optc-detail" style="margin-top:14px"></div>
     ${ladderLine}
     ${stLine}
     ${optcErrLine()}`;
+
+  /* الحفاظ على البطاقة المفتوحة عبر إعادة الرسم (تغيير الفرز، الميزانية...) */
+  if (OPTC.detail) {
+    const still = rows.find(r => r.sym === OPTC.detail);
+    if (still) optcRenderDetail(OPTC.detail); else OPTC.detail = null;
+  }
 }
 
 /** أسباب فشل الرموز — كانت تُجمع في OPT.errors ولا تُعرض في هذه اللوحة
