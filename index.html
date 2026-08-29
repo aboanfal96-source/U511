@@ -1021,7 +1021,24 @@ function parseY(res,sym){
   const cs=(window.KSAEngine?KSAEngine.sanitizeCandles(raw):raw);
   if(cs.length<10)return null;
   const last=cs[cs.length-1],pv=+(m.previousClose||m.chartPreviousClose||cs[cs.length-2]?.close||last.open).toFixed(2);
-  return{sym,cs,price:+(m.regularMarketPrice||last.close).toFixed(2),pv,hi:last.high,lo:last.low,op:last.open,vo:last.volume};
+  const livePrice=+(m.regularMarketPrice||last.close).toFixed(2);
+  /* 🛠️ تزامن الشمعة الأخيرة مع آخر تِكة حيّة — سبب «الشارت مقفل على سعر
+     مختلف عن الجداول» على أسهم كثيرة في آنٍ واحد.
+     ──────────────────────────────────────────────────────────────────
+     مزوّد البيانات يحدّث السعر اللحظي (regularMarketPrice) أسرع بكثير
+     من الشمعة اليومية الجارية؛ في الجلسات شديدة التقلب (فجوات كبيرة،
+     انعكاس حاد) قد يتأخر إغلاق آخر شمعة عن السعر الحقيقي بدقائق. وبما
+     أن الترويسة والجداول تُبنى من regularMarketPrice مباشرة بينما
+     الشارت يُرسم من مصفوفة الشموع كما وصلت، ينفصل الشارت عن كل رقم آخر
+     في المنصة — وهذا يحدث لأي سهم تصادف فيه هذا التأخر، لا لسهم بعينه.
+     الإصلاح: الشمعة الأخيرة تُمدَّد لتشمل آخر تِكة حيّة دائماً، فيبقى
+     الشارت متسقاً مع الترويسة والجداول بلا استثناء. */
+  if(livePrice>0&&last.close>0&&Math.abs(livePrice-last.close)/last.close>0.0015){
+    last.close=livePrice;
+    last.high=Math.max(last.high,livePrice);
+    last.low=Math.min(last.low,livePrice);
+  }
+  return{sym,cs,price:livePrice,pv,hi:last.high,lo:last.low,op:last.open,vo:last.volume};
 }
 function applyY(sym,d){G.demo.delete(sym);G.failed.delete(sym);G.cans[sym]=d.cs;G.pr[sym]=d.price;G.op[sym]=d.op;G.hi[sym]=d.hi;G.lo[sym]=d.lo;G.vo[sym]=d.vo;G.ch[sym]=+(d.price-d.pv).toFixed(2);G.pc[sym]=+((d.price-d.pv)/d.pv*100).toFixed(2);calcInd(sym);if(G.harmCache)delete G.harmCache[sym];if(G.ewCache)delete G.ewCache[sym];}
 /* 🛠️ إصلاح: حُذف الاعتماد على وسطاء CORS عامّين (allorigins / corsproxy).
@@ -3893,6 +3910,17 @@ function updateChart(sym){
   G.vSeries.setData(cs.map(c=>({time:c.time,value:c.volume,color:c.close>=c.open?'rgba(14,207,126,.12)':'rgba(240,68,88,.12)'})));
   if(ind?.sma20)G.series.s20.setData(cs.map((c,i)=>ind.sma20[i]!=null?{time:c.time,value:ind.sma20[i]}:null).filter(Boolean));
   if(ind?.sma50)G.series.s50.setData(cs.map((c,i)=>ind.sma50[i]!=null?{time:c.time,value:ind.sma50[i]}:null).filter(Boolean));
+  /* 🛠️ خط سعر حيّ صريح، دائم التزامن مع G.pr — لا مع إغلاق آخر شمعة.
+     كان المستخدم يقرأ "سعر الشارت" من مظهر آخر شمعة أو من خط دخول/هدف
+     مرسوم فوقها فيظن أنه السعر الحالي، بينما هو مستوى مخطَّط له لا سعراً
+     حياً. هذا الخط الآن هو المرجع الوحيد الذي يُوسَم صراحة "السعر الآن"،
+     ومصدره نفس G.pr المستخدم في الترويسة وكل الجداول — فلا يمكن أن
+     ينفصل عن أي رقم آخر في المنصة. */
+  if(_liveLine){try{G.cSeries.removePriceLine(_liveLine);}catch(e){}_liveLine=null;}
+  const livePr=G.pr[sym];
+  if(livePr>0){
+    try{_liveLine=G.cSeries.createPriceLine({price:livePr,color:'#4a9eff',lineWidth:1,lineStyle:3,axisLabelVisible:true,title:'● السعر الآن'});}catch(e){}
+  }
   G.lwChart.timeScale().fitContent();
   refreshPatternButtons(sym);
   /* Re-draw whichever overlay was active when switching stocks/timeframes */
@@ -4070,6 +4098,7 @@ document.addEventListener('webkitfullscreenchange',()=>{
    structure on the main chart so the user can see its shape, whether or
    not the pattern is fully complete. ══ */
 let _patMode=null,_patLineSeriesArr=[],_patTargetLines=[];
+let _liveLine=null;/* خط "السعر الآن" على الشارت الرئيسي — يُزال ويُعاد رسمه في كل updateChart */
 function refreshPatternButtons(sym){
   ensurePatternData(sym);
   const harm=G.harmCache?.[sym],ew=G.ewCache?.[sym],wolfe=G.wolfeCache?.[sym],chan=G.chanCache?.[sym];
@@ -4315,6 +4344,15 @@ function updateTradePlan(sym){
   </div>`;
 
   const ev=calcEntryVerdict(sym,tp);
+  const curPr=G.pr[sym]||0;
+  /* 🛠️ توضيح لا يقلّ أهمية عن أي إصلاح رقمي: «نقطة الدخول» في خطة
+     الاختراق أعلى من السعر الحالي بتصميم — هي مستوى يُشترى عنده لاحقاً،
+     لا السعر الذي يتداول عنده السهم الآن. كان الصندوقان («نقطة الدخول»
+     و«وقف الخسارة») يظهران بلا أي إشارة للسعر الحالي، فيسهل الخلط بين
+     «هذا مستوى مستقبلي بانتظار الاختراق» و«هذا سعر السهم الآن» — وهو
+     تحديداً ما التبس على من رأى الشارت "يعرض" رقماً غير رقم القوائم. */
+  const entryFarAbove=curPr>0&&tp.entry>curPr*1.01;
+  const curPrLine=curPr>0?`<div class="tp-box-sub" style="margin-top:2px;color:#4a9eff">● السعر الآن: ${curPr.toFixed(2)}$</div>`:'';
 
   const verdictHtml=ev?`
     <div class="tp-verdict-box">
@@ -4337,7 +4375,8 @@ function updateTradePlan(sym){
       <div class="tp-box">
         <div class="tp-box-title">✅ نقطة الدخول</div>
         <div class="tp-box-val" style="color:var(--up)">${tp.entry}</div>
-        <div class="tp-box-sub">${tp.planType==='breakout'?'دخول عند كسر المقاومة وتأكيده':'دخول عند السعر الحالي'}</div>
+        <div class="tp-box-sub">${entryFarAbove?`⏳ بانتظار الاختراق — ${(((tp.entry-curPr)/curPr)*100).toFixed(1)}٪ فوق السعر الحالي، ليس سعراً للتنفيذ الآن`:tp.planType==='breakout'?'دخول عند كسر المقاومة وتأكيده':'دخول عند السعر الحالي'}</div>
+        ${curPrLine}
       </div>
       <div class="tp-box">
         <div class="tp-box-title">🛑 وقف الخسارة</div>
