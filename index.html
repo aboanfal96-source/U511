@@ -1055,6 +1055,18 @@ async function _fetchCandles(sym,r,i,dest){
             G.chart={sym,cs:p.cs,ind:_indFrom(p.cs)};
           }else{
             applyY(sym,p);
+            /* 🛠️ العطل: «الشارت مقفل على سعر قديم بينما التبويبات تعرض
+               سعراً جديداً». السبب أن المسح الشامل يعيد تحميل *كل* سهم في
+               كل مرة (بما فيها السهم المفتوح حالياً في الشارت) لتحديث
+               الأسعار في الجداول، لكن أحداً لم يكن يُعيد رسم الشارت أو
+               ترويسة السعر لذلك السهم بعد التحديث — فتبقى الشاشة عالقة
+               على القراءة القديمة من قبل بدء المسح، بينما كل تبويب آخر
+               (المبني من _advData الطازج) يعرض السعر الجديد. وهذا يحدث
+               من أي مسار يُعيد تحميل بيانات التحليل، لا المسح الشامل وحده
+               (غرفة القرار، الرادار، ماسح العقود). الإصلاح هنا لا في كل
+               مسار على حدة: إن كان السهم المُحدَّث هو نفسه المعروض على
+               الشارت الآن، أُعِد رسمه فوراً. */
+            if(sym===G.sel){updateHeader(sym);updateChart(sym);updateTradePlan(sym);}
           }
           ok=true;G.src=d._source||'?';
         }else reason='الاستجابة لا تحتوي شموعاً صالحة كافية';}
@@ -3543,12 +3555,61 @@ function toggleWhy(sym){
   if(row)row.classList.toggle('show',_whyOpen[sym]);
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+   ⏱ عمود «الحركة الزمنية» في تبويب جميع الأسهم
+   ──────────────────────────────────────────────────────────────────────
+   يجب أن يتوافق مع رادار الحركة المتوقعة — لا أن يكون حساباً موازياً
+   قد يختلف عنه. لذلك: إن كان الرادار قد حُسب، يُقرأ من صفوفه حرفياً
+   (نفس الرقم، نفس المصدر، نفس علامة التحقق). وإن لم يُحسب بعد، تُشغَّل
+   نفس خطوة الرادار الأولى فقط (طيفي خفيف، دون التحقق الثقيل خارج العيّنة)
+   حتى لا يُبطئ رسم جدول يضم مئتي سهم — ويُعلَّم الفرق بوضوح: نتيجة من
+   الرادار تُعرض بثقة، ونتيجة أوّلية تُعرض موسومة «غير مؤكَّد» وتدعو
+   لفتح تبويب الرادار للتحقق الكامل. */
+const _allTimingCache={};
+function allTabTiming(sym){
+  if(RADAR&&RADAR.ran&&Array.isArray(RADAR.rows)){
+    const r=RADAR.rows.find(x=>x.sym===sym);
+    if(r){
+      const when=r.barsAhead===0?'اليوم':r.barsAhead===1?'غداً':`بعد ${r.barsAhead}ج`;
+      return{
+        text:`${r.isValley?'🟢':'🔴'} ${when}`,
+        color:r.isValley?'var(--up)':'var(--dn)',
+        title:`رادار الحركة المتوقعة: ${r.source==='spectral'?(r.validated?'دورة طيفية مؤكَّدة خارج العيّنة':'دورة طيفية دالة، غير مؤكَّدة بعد'):'نافذة كلاسيكية (مفروضة من خارج السهم)'} · تاريخ تقديري ${r.date}`
+      };
+    }
+    return{text:'—',color:'var(--t3)',title:'لا انعطاف مقاس ضمن أفق الرادار الحالي (فُحص وحُسم)'};
+  }
+  const cs=G.cans[sym];
+  if(!cs||cs.length<120||G.demo.has(sym))
+    return{text:'—',color:'var(--t3)',title:'يحتاج عمقاً تاريخياً كافياً أو تشغيل تبويب الرادار'};
+  const key=sym+'|'+cs.length;
+  if(_allTimingCache[key])return _allTimingCache[key];
+  let out=null;
+  try{
+    const sp=KSAEngine.spectralPro(cs.map(c=>c.close),{alpha:0.05});
+    if(sp&&sp.ok&&sp.significant){
+      const turns=KSAEngine.projectTurnsPro(sp,60)||[];
+      const nx=turns.find(t=>t.barsAhead>=0&&t.barsAhead<=45);
+      if(nx){
+        const isValley=nx.type==='valley';
+        const when=nx.barsAhead===0?'اليوم':nx.barsAhead===1?'غداً':`بعد ${nx.barsAhead}ج`;
+        out={text:`${isValley?'🟢':'🔴'} ${when}`,color:isValley?'var(--up)':'var(--dn)',
+          title:`دورة طيفية ${sp.period}ج — غير مؤكَّدة خارج العيّنة بعد. افتح «رادار الحركة المتوقعة» للتحقق الكامل.`};
+      }
+    }
+  }catch(e){}
+  if(!out)out={text:'—',color:'var(--t3)',title:'لا دورة طيفية دالة على هذا السهم'};
+  _allTimingCache[key]=out;
+  return out;
+}
+window.allTabTiming=allTabTiming;
+
 /* ══ TABLE HEADERS BY FILTER ══ */
 function getHeaders(){
   const base='<th onclick="sortResults(\'sym\')">الرمز</th><th>الاسم</th><th onclick="sortResults(\'price\')">السعر</th><th onclick="sortResults(\'pct\')">%</th>';
   const end='<th onclick="sortResults(\'master\')">🏆 النتيجة</th><th>الإشارة</th><th>شرح</th>';
   const cols={
-    all:`${base}<th onclick="sortResults(\'vz\')">سيولة</th><th onclick="sortResults(\'ma_a\')">زخم</th><th onclick="sortResults(\'rs_v\')">RS</th><th onclick="sortResults(\'sq_s\')">ضغط</th><th onclick="sortResults(\'ab_s\')">امتصاص</th><th onclick="sortResults(\'fg_c\')">FVG</th>${end}`,
+    all:`${base}<th onclick="sortResults(\'vz\')">سيولة</th><th onclick="sortResults(\'ma_a\')">زخم</th><th onclick="sortResults(\'rs_v\')">RS</th><th onclick="sortResults(\'sq_s\')">ضغط</th><th onclick="sortResults(\'ab_s\')">امتصاص</th><th onclick="sortResults(\'fg_c\')">FVG</th><th title="موعد الانعطاف الزمني المتوقع — نفس مصدر تبويب رادار الحركة المتوقعة، ويقرأ نتائجه حرفياً إن كان قد حُسب">⏱ الحركة الزمنية</th>${end}`,
     vz:`${base}<th>Z-Score</th><th>الحالة</th><th>الحجم</th>${end}`,
     ma:`${base}<th>التسارع</th><th>Jerk</th><th>الحالة</th>${end}`,
     rs:`${base}<th>RS</th><th>ROC السهم</th><th>الحالة</th>${end}`,
@@ -3697,7 +3758,8 @@ function renderResults(){
 
     let midCols='';
     if(_filter==='all'){
-      midCols=`<td>${tag(d.vz.color,`Z:${d.vz.z}`)}</td><td>${tag(d.ma.color,d.ma.accel>0?'+'+d.ma.accel:d.ma.accel)}</td><td>${tag(d.rs.color,`RS:${d.rs.rs}`)}</td><td>${tag(d.sq.color,d.sq.squeeze?'🔴':'—')}</td><td>${tag(d.ab.color,d.ab.score>0?'+'+d.ab.strength+'%':d.ab.score.toFixed(0))}</td><td>${tag(d.fg.color,d.fg.count?'FVG'+d.fg.count:'—')}</td>`;
+      const tmg=allTabTiming(d.sym);
+      midCols=`<td>${tag(d.vz.color,`Z:${d.vz.z}`)}</td><td>${tag(d.ma.color,d.ma.accel>0?'+'+d.ma.accel:d.ma.accel)}</td><td>${tag(d.rs.color,`RS:${d.rs.rs}`)}</td><td>${tag(d.sq.color,d.sq.squeeze?'🔴':'—')}</td><td>${tag(d.ab.color,d.ab.score>0?'+'+d.ab.strength+'%':d.ab.score.toFixed(0))}</td><td>${tag(d.fg.color,d.fg.count?'FVG'+d.fg.count:'—')}</td><td style="white-space:nowrap" title="${tmg.title}"><span style="color:${tmg.color};font-weight:700;font-size:calc(var(--base-font)*0.85)">${tmg.text}</span></td>`;
     }else if(_filter==='time'){
       const tatCol=d.tat.sniperBonus?(d.tat.dirUp?'s4':'s1'):d.tat.penalty?'s1':'na';
       /* ⏱ قوة التوافق — تصنيف نصي مبني على عدد الأدلة الزمنية المستقلة
