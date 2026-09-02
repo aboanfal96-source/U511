@@ -6158,7 +6158,11 @@ async function smartTimingAnalysis() {
            هذه المسافات، بدل افتراض أن أرقام غان/فيبوناتشي تعمل على كل سهم؟ */
     let coh = null, emp = null;
     try { if (KSAEngine.cycleCoherence) coh = KSAEngine.cycleCoherence(candles); } catch (e) { }
-    try { if (KSAEngine.empiricalPivotCycles) emp = KSAEngine.empiricalPivotCycles(candles, { permutations: 300 }); } catch (e) { }
+    /* 🛠️ alpha=0.10 (افتراضي المحرّك) قِيس فعلياً بمحاكاة 300 مسار مشي
+       عشوائي بحت (لا دورة حقيقية فيه إطلاقاً): يدّعي «دورة مؤكَّدة»
+       في 9.7٪ من الحالات محضاً بالصدفة. alpha=0.05 يخفضها إلى 3.3٪ —
+       أنسب لشيء نعرضه بعلامتي صح خضراوين كأنه مؤكَّد. */
+    try { if (KSAEngine.empiricalPivotCycles) emp = KSAEngine.empiricalPivotCycles(candles, { permutations: 300, alpha: 0.05 }); } catch (e) { }
     const dc = KSAEngine.dominantPivotCycle(candles, 3);
     const w52 = calc52WeekRange(candles, price);
     const vol = KSAEngine.volatility(closes);
@@ -6294,10 +6298,11 @@ async function smartTimingAnalysis() {
           const left = c.cycle - b;
           const dt = left > 0 ? usAddTradingDays(left) : null;
           const inWin = Math.abs(left) <= c.tolerance;
+          const farProj = left > 0 && left > 0.7 * c.cycle;
           return `<div style="${ROW}">${inWin ? '<span style="color:#0ecf7e">◉</span>' : left > 0 ? '<span style="color:#f5c842">○</span>' : '<span style="color:#3d4a5e">✗</span>'}
             دورة <b>${c.cycle} جلسة</b> (×${c.lift}، p=${c.pValue}) —
             ${inWin ? '<b style="color:#0ecf7e">داخل النافذة الآن</b>'
-              : left > 0 ? `تبقّى <b>${left}</b> جلسة <span style="font-size:11px;color:#9aa4b8">(${dt.toLocaleDateString('ar-EG')})</span>`
+              : left > 0 ? `تبقّى <b>${left}</b> جلسة <span style="font-size:11px;color:#9aa4b8">(${dt.toLocaleDateString('ar-EG')})</span>${farProj ? ' <span style="color:#f5c842">⚠️ بداية الدورة — أبعد إسقاط ممكن ضمنها</span>' : ''}`
                 : `مضت منذ <b>${-left}</b> جلسة`}</div>`;
         }).join('');
         return `<div style="margin-top:10px;padding:10px 12px;background:rgba(34,211,238,.07);border:1px solid rgba(34,211,238,.25);border-radius:8px">
@@ -9164,7 +9169,7 @@ function timeActivation(sym) {
       if (pv) {
         const conf = KSAEngine.timeConfluence(cs, pv);
         barsSince = conf?.barsSincePivot ?? null;
-        emp = KSAEngine.empiricalPivotCycles(cs, { permutations: 300 });
+        emp = KSAEngine.empiricalPivotCycles(cs, { permutations: 300, alpha: 0.05 }); /* انظر الملاحظة في smartTimingAnalysis أعلاه — نفس السبب */
       }
     }
   } catch (e) { }
@@ -9173,24 +9178,36 @@ function timeActivation(sym) {
   if (empCycles.length && barsSince != null) {
     const enriched = empCycles.map(c => {
       const left = c.cycle - barsSince;
-      return { ...c, left, inWindow: Math.abs(left) <= (c.tolerance ?? 2) };
+      /* 🛠️ حارس «الإسقاط البعيد» — لم يكن موجوداً إطلاقاً.
+         ─────────────────────────────────────────────────────────────
+         قِيس فعلياً بمحاكاة: على مسارات مشي عشوائي بحت لا دورة فيها،
+         7٪ منها (حتى بعد تشديد alpha، تبقى نسبة قابلة للحدوث) يخرج
+         منها الاختبار بدورة «مؤكَّدة» يكون فيها السهم عند بداية الدورة
+         تماماً — أي أن ما بقي منها (٩٥٪ فأكثر من طولها) هو المسقَط
+         للمستقبل بأكمله. هذه أضعف نقطة ممكنة لأي ادّعاء دوري: أقل ما
+         تراكم من تكرارات، وأبعد ما يكون الإسقاط عن أي بيانات قريبة
+         تُسنِده. تُوسَم صراحةً ولا تُعرض بثقة «✓✓» الكاملة. */
+      const farProjection = left > 0.7 * c.cycle;
+      return { ...c, left, inWindow: Math.abs(left) <= (c.tolerance ?? 2), farProjection };
     });
     const inNow = enriched.find(c => c.inWindow);
     const nextUp = enriched.filter(c => c.left > 0).sort((a, b) => a.left - b.left)[0];
     out.sources.push({
       rank: 2, key: 'empirical', tier: 'مقاسة على السهم نفسه',
-      name: 'دورات السهم المؤكَّدة تجريبياً', ok: true, validated: true,
-      detail: `${enriched.length} دورة اجتازت اختبار التبديل: ${enriched.map(c => c.cycle + 'ج').join(' · ')} — ` +
+      name: 'دورات السهم المؤكَّدة تجريبياً', ok: true, validated: !nextUp?.farProjection || !!inNow,
+      detail: `${enriched.length} دورة اجتازت اختبار التبديل (تصحيح Benjamini-Hochberg، ثقة ٩٥٪): ${enriched.map(c => c.cycle + 'ج').join(' · ')} — ` +
         (inNow
           ? `<b style="color:#0ecf7e">السهم داخل نافذة دورة ${inNow.cycle} جلسة الآن</b> (مضى ${barsSince} جلسة منذ الارتكاز، والتسامح ±${inNow.tolerance})`
           : nextUp
-            ? `السهم ليس داخل نافذته الآن — تبقّى ${nextUp.left} جلسة على دورة ${nextUp.cycle}`
+            ? `السهم ليس داخل نافذته الآن — تبقّى ${nextUp.left} جلسة على دورة ${nextUp.cycle}` +
+              (nextUp.farProjection ? ` <span style="color:#f5c842">⚠️ السهم عند بداية الدورة تقريباً — هذا أبعد إسقاط ممكن ضمنها وأقله استناداً لتكرارات قريبة</span>` : '')
             : `كل الدورات مضت منذ آخر ارتكاز (${barsSince} جلسة)`)
     });
     if (!out.primary && (inNow || nextUp)) {
       const c = inNow || nextUp;
       const pvType = (() => { try { return KSAEngine.lastConfirmedPivot(cs, 3)?.type; } catch (e) { return null; } })();
       const isValley = pvType === 'H';
+      const isFar = !inNow && c.farProjection;
       out.primary = {
         source: 'empirical',
         sourceLabel: 'دورة ارتكاز مؤكَّدة تجريبياً على هذا السهم',
@@ -9199,7 +9216,7 @@ function timeActivation(sym) {
         sdBars: c.tolerance ?? null,
         loBars: Math.max(0, c.left - (c.tolerance ?? 2)),
         hiBars: Math.max(0, c.left) + (c.tolerance ?? 2),
-        usable: true, validated: true, period: c.cycle
+        usable: !isFar, validated: !isFar, period: c.cycle, farProjection: isFar
       };
     }
   } else {
@@ -9286,11 +9303,19 @@ function timeActivation(sym) {
         : `المصدر دورة ${p.period} جلسة دالة إحصائياً، لكنها <b>لم تُختبر بنجاح خارج العيّنة</b> — وصف للماضي لا أداة توقيت. للتنبيه لا للتنفيذ.`;
       if (!p.usable) out.sub += ' كما أن نطاق الانعطاف أوسع من ربع دورة، فلا تُبنى عليه صفقة.';
     } else if (p.source === 'empirical') {
-      out.color = '#22d3ee'; out.icon = '◉';
+      /* 🛠️ كان اللون والأيقونة ثابتين (ثقة كاملة) بلا نظر إلى مكان
+         الإسقاط ضمن الدورة. إسقاط عند 95٪ من طول الدورة (بداية دورة
+         طولها 60 مثلاً، والمتبقي 57) هو أضعف نقطة ممكنة لهذا المصدر —
+         أقل تكرارات تُسنِده تاريخياً، وأبعد ما يكون عن أي بيانات قريبة.
+         الآن يُوسَم بوضوح ولا يُعرض بنفس ثقة إسقاط قريب أو داخل النافذة
+         فعلاً. */
+      out.color = p.farProjection ? '#f5c842' : '#22d3ee';
+      out.icon = p.farProjection ? '⚠️' : '◉';
       out.headline = p.barsAhead === 0
         ? `السهم داخل نافذة دورته المؤكَّدة (${p.period} جلسة) الآن.`
         : `أقرب ${kind} ${whenTxt}${bandTxt} — بتاريخ تقديري ${p.dateText}.`;
-      out.sub = `لا دورة طيفية دالة على هذا السهم، لكن المسافة ${p.period} جلسة بين ارتكازاته تتكرّر أكثر مما ينتجه الخلط العشوائي. مصدر أضعف من الطيف لأنه بلا نطاق عدم يقين مقاس.`;
+      out.sub = `لا دورة طيفية دالة على هذا السهم، لكن المسافة ${p.period} جلسة بين ارتكازاته تتكرّر أكثر مما ينتجه خلط تباعدها عشوائياً (ثقة ٩٥٪ بعد تصحيح الاختبارات المتعددة). نطاق عدم اليقين هنا نسبة ثابتة (٪٨ من طول الدورة) لا انحرافاً معيارياً مقاساً كما في الطيف — لذا يبقى أضعف من الطيف حتى مع دلالته الإحصائية.`;
+      if (p.farProjection) out.sub += ` <b style="color:#f5c842">والسهم الآن عند بداية الدورة تقريباً — هذا أبعد إسقاط ممكن ضمنها وأقله يقيناً. للتنبيه والمراقبة الدورية لا للتنفيذ.</b>`;
     } else {
       out.color = '#7a8ba8'; out.icon = '⚠️';
       out.headline = `لا موعد مقاس على هذا السهم — أقرب ما يوجد نافذة كلاسيكية ${whenTxt} (${p.dateText}).`;
