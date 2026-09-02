@@ -1442,6 +1442,11 @@ function optEnsureDom() {
       <button class="optc-s" onclick="optcSort('cheap',this)" style="padding:4px 10px;font-size:10px;font-family:inherit;border:none;border-left:1px solid var(--bd2);background:transparent;color:var(--t2);cursor:pointer">الأرخص</button>
       <button class="optc-s" onclick="optcSort('prob',this)" style="padding:4px 10px;font-size:10px;font-family:inherit;border:none;background:transparent;color:var(--t2);cursor:pointer">الأعلى احتمالاً</button>
     </div>
+    <div style="display:flex;gap:0;border:1px solid var(--bd2);border-radius:5px;overflow:hidden;flex-shrink:0">
+      <button class="optc-h" data-h="all" onclick="optcSetHorizon('all',this)" style="padding:4px 10px;font-size:10px;font-family:inherit;border:none;border-left:1px solid var(--bd2);background:rgba(255,215,0,.18);color:#FFD700;cursor:pointer">الكل</button>
+      <button class="optc-h" data-h="يومي" onclick="optcSetHorizon('يومي',this)" style="padding:4px 10px;font-size:10px;font-family:inherit;border:none;border-left:1px solid var(--bd2);background:transparent;color:var(--t2);cursor:pointer">⚡ يومي</button>
+      <button class="optc-h" data-h="أسبوعي" onclick="optcSetHorizon('أسبوعي',this)" style="padding:4px 10px;font-size:10px;font-family:inherit;border:none;background:transparent;color:var(--t2);cursor:pointer">📅 أسبوعي</button>
+    </div>
     <button onclick="optcToggleAligned(this)" class="scan-btn" style="background:transparent;border:1px solid var(--bd2);color:var(--t2);flex-shrink:0" title="لا يُعرض إلا عقد يوافق اتجاه الشارت ودورته الزمنية">📊 المتوافقة مع الشارت فقط</button>
     <span id="optc-prog" style="font-size:10px;color:var(--t2);margin-right:auto;flex:1;min-width:160px">لم يبدأ — اضغط «امسح كل العقود»</span>`;
   wrap.parentElement.insertBefore(cbar, wrap);
@@ -8051,6 +8056,7 @@ const OPTC = {
   poolPerSym: 8,        /* عقود تُحتفظ بها لكل رمز داخلياً — للبدائل في بطاقة التفصيل فقط */
   perSym: 1,            /* 🔒 عقد واحد لكل رمز في الجدول — الأقوى فقط، لا تكرار */
   minRows: 30,          /* هدف إرشادي فقط — لا يُكسر عبر تكرار سهم */
+  horizon: 'all',        /* all | يومي | أسبوعي — فلترة الأفق الزمني للعقد */
   detail: null,         /* الرمز المفتوحة تفاصيله حالياً، إن وُجد */
   sort: 'best',         /* best | volume | cheap | prob */
   onlyAligned: false,   /* العقود المتوافقة مع الشارت فقط */
@@ -8094,10 +8100,69 @@ function optChartFit(sym) {
         }
         if (ep.structuralTargets >= 2) { out.score += 8; out.why.push('هدفان بنيويان فوق السعر — الطريق معرّف'); }
       }
+    } else {
+      /* ── نظير هبوطي لم يكن موجوداً إطلاقاً — والسبب الحقيقي وراء رفض
+         شبه كل عقود البوت في الماسح.
+         ──────────────────────────────────────────────────────────────
+         الكول وحده كان يحصل على هدف بنيوي حقيقي (أقرب مقاومة) عبر
+         buildEntryPlan. البوت كان يُترك بلا أي هدف بنيوي (fit.target
+         يبقى null دائماً)، فيسقط hedgeScan إلى «الحركة التي يسعّرها
+         السوق» وحدها — وهي عند استحقاق قصير رقم صغير جداً (بضعة
+         دولارات) مقارنة بشبكة استرايكات تمتد ±30٪ من السعر. النتيجة:
+         كل عقد بوت تقريباً يُقاس بهدف أضيق بكثير مما يستحقه، فيسقط عند
+         بوابة العائد/المخاطرة بلا استثناء — ليس لأن البوت سيئ، بل لأن
+         الهدف المقارَن به لم يكن هدفاً حقيقياً من الأساس.
+         الحل: نفس آلة اكتشاف المستويات (swingLevels/mergeLevels) تُستعمل
+         بالعكس — أقرب دعم تحت السعر هو هدف البوت، وأقرب مقاومة فوقه هي
+         بطلان الفرضية الهبوطية (المعادل الهبوطي لسقف المطاردة). */
+      try {
+        const cs = G.cans[sym];
+        if (cs && cs.length >= 60) {
+          const price = cs[cs.length - 1].close;
+          const ind = G.ind[sym] || {};
+          const atrB = ind.atr > 0 ? ind.atr : price * 0.02;
+          const sw = swingLevels(cs, 3);
+          const supAll = mergeLevels(sw.lo.filter(p => p.price < price * 0.998), cs.length, atrB);
+          const resAll = mergeLevels(sw.hi.filter(p => p.price > price * 1.002), cs.length, atrB);
+          if (supAll.length) {
+            out.target = supAll[supAll.length - 1].price;
+            out.why.push(`أقرب دعم بنيوي تحته ${out.target} (${supAll[supAll.length - 1].touches} لمسة) — هدف هبوطي حقيقي لا حركة متوقعة صغيرة`);
+          }
+          if (resAll.length) {
+            out.stop = +(resAll[0].price + 0.35 * atrB).toFixed(2);
+          } else {
+            out.stop = +(price + 1.6 * atrB).toFixed(2);
+          }
+          const chaseFloor = out.target != null ? +((out.target + 1.8 * out.stop) / 2.8).toFixed(2) : null;
+          if (chaseFloor != null && price < chaseFloor) {
+            out.score -= 14;
+            out.why.push(`⚠️ السهم تحت أدنى سعر منطقي للدخول الهبوطي ${chaseFloor} — الهبوط ممتد بالفعل`);
+          }
+        }
+      } catch (e) { }
     }
+
+    /* ── حركة اليوم — «تواكب الشارت» تعني قراءة الجلسة الحالية صراحة ──
+       الفت السابق كان يقرأ البنية متعددة الجلسات فقط، ويتجاهل كون
+       السهم اليوم تحديداً قفز أو انهار بنسبة كبيرة — وهي بالضبط الحالة
+       التي يشير إليها المستخدم (سهم يتحرك ٣٠٪+ في جلسة واحدة). حركة
+       اليوم في اتجاه العقد تُحسب دليل تتبّع حيّ، وحركة كبيرة جداً بالفعل
+       تُنقَص لأن مطاردة قفزة ممتدة ترفع مخاطرة الارتداد قبل التنفيذ. */
+    try {
+      const pc = G.pc[sym];
+      if (pc != null && Math.abs(pc) >= 4) {
+        const withMove = dir.dirUp ? pc > 0 : pc < 0;
+        out.why.push(`${withMove ? '✓' : '⚠️'} حركة اليوم ${pc > 0 ? '+' : ''}${pc.toFixed(1)}٪ ${withMove ? '— تؤكّد اتجاه العقد' : '— تعاكس اتجاه العقد'}`);
+        out.score += withMove ? Math.min(10, Math.abs(pc) * 0.35) : -Math.min(16, Math.abs(pc) * 0.6);
+        if (withMove && Math.abs(pc) >= 15) {
+          out.score -= 8;
+          out.why.push(`⚠️ حركة اليوم كبيرة جداً (${Math.abs(pc).toFixed(0)}٪) — سعر ممتد ومخاطرة ارتداد قبل بلوغ الهدف`);
+        }
+      }
+    } catch (e) { }
   } catch (e) { }
 
-  out.score = Math.round(Math.max(-40, Math.min(60, out.score)));
+  out.score = Math.round(Math.max(-56, Math.min(68, out.score)));
   out.label = out.score >= 34 ? 'متوافق تماماً' : out.score >= 16 ? 'متوافق' :
               out.score >= 0 ? 'محايد' : 'مخالف للشارت';
   return out;
@@ -8106,6 +8171,17 @@ function optChartFit(sym) {
 async function optScanContracts() {
   if (OPTC.busy) return;
   OPTC.busy = true; OPTC.cancel = false; OPTC.rows = [];
+  /* 🛠️ عطل ثانٍ أخطر من تأخّر سعر السهم: سلسلة العقود نفسها (الاسترايكات،
+     العرض/الطلب، التذبذب الضمني) كانت تُخزَّن في OPT.chains بمفتاح
+     «الرمز|تاريخ الاستحقاق» **بلا أي انتهاء صلاحية**. فحتى بعد إصلاح
+     تحديث سعر السهم، إعادة المسح كانت تُعيد استعمال نفس سلسلة العقود
+     التي جُلبت أول مرة في الجلسة — أي أن الاسترايك والعلاوة المعروضين
+     يعكسان لحظة الجلب الأولى لا اللحظة الحالية، مهما كرّرت الضغط على
+     «امسح». هذا على الأرجح السبب الحقيقي والأعمق وراء «كول 220 والسهم
+     عند 225»: أول مسح في الجلسة جلب سلسلة NVDA عند سعر قريب من 220
+     وحُفظت إلى الأبد. كل مسح صريح يُفرِّغ الذاكرة المؤقتة الآن، فتُجلب
+     كل سلسلة عقود من جديد في كل مرة. */
+  OPT.chains = {}; OPT.expiries = {};
   const prog = document.getElementById('optc-prog');
   const list = optWatchlist();
   const O = window.KSAEngine?.Options;
@@ -8122,7 +8198,14 @@ async function optScanContracts() {
     if (prog) prog.innerHTML = `يقيّم سلاسل ${sym} … <b>${i + 1}/${list.length}</b> · <span style="color:#FFD700">${rows.length} عقد</span>`;
 
     try {
-      if (!G.cans[sym] || G.cans[sym].length < 60) await loadStock(sym);
+      /* 🛠️ إصلاح جوهري: كان الشرط `!G.cans[sym] || length<60` يعني أن أي
+         سهم مُحمَّل مسبقاً (وهذا كل الرموز عملياً بعد أول مسح في الجلسة)
+         لا يُعاد جلبه إطلاقاً — فيُقيَّم كل عقد على سعر لحظة قديمة بينما
+         السهم يواصل التحرّك. هذا بالضبط ما ينتج توصية «كول 220» بعد أن
+         يكون السهم قد بلغ 225: ليس خللاً في اختيار الاسترايك، بل في
+         السعر الذي قِيس الاسترايك مقابله. كل رمز يُعاد جلبه الآن حيّاً
+         عند كل مسح — تماماً كما يفعل «المسح الشامل» لنفس السبب. */
+      await loadStock(sym);
       if (G.demo.has(sym)) continue;
 
       const fit = optChartFit(sym);
@@ -8133,17 +8216,22 @@ async function optScanContracts() {
       if (!expiries) { const probe = await optFetchChain(sym, null); expiries = probe.expiries; }
       if (!expiries || !expiries.length) continue;
 
-      /* استحقاقان أسبوعيان: القريب والذي يليه — يضاعف عدد المرشّحين
-         ويعطي المستخدم خياراً بين ثيتا أسرع وثيتا أبطأ. */
+      /* ══ عقود يومية وأسبوعية معاً — لا الأسبوعية وحدها ══
+         المستخدم يريد مضاربة السهم واليوم معاً. النافذة القديمة
+         (2–12 جلسة) كانت تستبعد أقرب استحقاق (0–1 جلسة) بالكامل —
+         بالضبط عقود اليوم/الغد التي تُطلَب صراحة. الآن نجمع الفئتين
+         في مسح واحد، ونُسِم كل عقد بفئته صراحة في الجدول. */
       const M = KSAEngine.USMarket, now = new Date();
-      const picks = [];
+      const picksDaily = [], picksWeekly = [];
       for (const ts of expiries) {
         const d = new Date(ts * 1000);
         if (d <= now) continue;
         const sess = M.tradingDaysBetween(now, d);
-        if (sess >= 2 && sess <= 12) picks.push({ ts, d, sess });
-        if (picks.length >= 2) break;
+        if (sess <= 1 && picksDaily.length < 1) picksDaily.push({ ts, d, sess, category: 'يومي' });
+        else if (sess >= 2 && sess <= 12 && picksWeekly.length < 2) picksWeekly.push({ ts, d, sess, category: 'أسبوعي' });
+        if (picksDaily.length >= 1 && picksWeekly.length >= 2) break;
       }
+      const picks = [...picksDaily, ...picksWeekly];
       if (!picks.length) continue;
 
       const cs = G.cans[sym];
@@ -8190,12 +8278,12 @@ async function optScanContracts() {
            والهدف البنيوي لم يُهمَل: يبقى معروضاً في العمود، وإن كان أبعد
            من الحركة المتوقعة فهو المستعمل — أي أن التشديد يبقى حين يكون
            مبرَّراً، ويسقط حين يكون مصطنعاً. */
-        const structT = wantCall ? fit.target : null;
+        const structT = fit.target;
         const structDist = structT ? Math.abs(structT - spot) : 0;
         const moveDist = Math.max(structDist, emAbs);
         const uTarget = wantCall ? spot + moveDist : spot - moveDist;
         const targetSrcLbl = structDist > emAbs ? 'هدف بنيوي' : 'الحركة التي يسعّرها السوق';
-        const uStop = (wantCall ? fit.stop : null) ?? (wantCall ? spot - 1.6 * atr : spot + 1.6 * atr);
+        const uStop = fit.stop ?? (wantCall ? spot - 1.6 * atr : spot + 1.6 * atr);
 
         for (const rc of raw) {
           st.seen++;
@@ -8244,11 +8332,24 @@ async function optScanContracts() {
           sc += Math.min(20, rr * 5);
           sc += beVsEm != null ? (beVsEm < 0.6 ? 14 : beVsEm < 1.0 ? 8 : beVsEm < 1.4 ? 0 : -12) : 0;
           sc += fit.score * 0.55;
+          /* 🛠️ نطاق الدلتا كان موحّداً (٠٫٢٥–٠٫٧٠) بلا تمييز بين مضاربة
+             يومية وأسبوعية، وبلا عقوبة حقيقية على العقود العميقة داخل
+             النقد. عقد دلتا ٠٫٨٥ يتحرك كالسهم تقريباً — بديل سهم، لا
+             أداة مضاربة رخيصة مواكبة للحركة، وكان يُسجَّل تعادلاً (+8)
+             بدل أن يُستبعَد. الآن: نطاق أضيق حول «قرب النقد» بحسب الأفق
+             (اليومي يحتمل دلتا أعلى قليلاً لأنه أقصر عمراً وأقل حساسية
+             لتآكل الوقت)، وعقوبة صريحة تتصاعد مع العمق داخل النقد. */
           const absD = Math.abs(c.delta || 0);
-          sc += absD >= 0.25 && absD <= 0.70 ? 8 : absD >= 0.15 ? 2 : -8;
+          const dLo = pk.category === 'يومي' ? 0.38 : 0.28;
+          const dHi = pk.category === 'يومي' ? 0.62 : 0.52;
+          if (absD >= dLo && absD <= dHi) sc += 12;             /* المنطقة المثالية للمضاربة */
+          else if (absD > dHi && absD <= 0.70) sc += 2;          /* داخل النقد قليلاً — مقبول */
+          else if (absD > 0.70) sc -= 10 + Math.round((absD - 0.70) * 60); /* عميق — بديل سهم لا مضاربة */
+          else if (absD >= 0.15) sc += 2;                        /* بعيد جداً خارج النقد */
+          else sc -= 8;                                          /* شبه منتهي الصلاحية عملياً */
 
           symRows.push({
-            sym, name: NAMES[sym] || sym, spot, type,
+            sym, name: NAMES[sym] || sym, spot, type, category: pk.category,
             strike: c.strike, expiryTs: pk.ts,
             expiry: pk.d.toLocaleDateString('ar-EG', { day: '2-digit', month: '2-digit' }),
             sessions: pk.sess,
@@ -8265,6 +8366,7 @@ async function optScanContracts() {
             fit, fitScore: fit.score, fitLabel: fit.label,
             turnBars: fit.turnBars,
             timingFits: fit.turnBars == null ? null : (fit.turnBars + 1 < pk.sess),
+            scannedAt: Date.now(),
             score: Math.round(sc)
           });
         }
@@ -8322,6 +8424,16 @@ function optcToggleAligned(el) {
   el.style.color = OPTC.onlyAligned ? '#0ecf7e' : 'var(--t2)';
   optRenderContracts();
 }
+function optcSetHorizon(h, el) {
+  OPTC.horizon = h;
+  document.querySelectorAll('.optc-h').forEach(b => {
+    const on = b === el;
+    b.style.background = on ? 'rgba(255,215,0,.18)' : 'transparent';
+    b.style.color = on ? '#FFD700' : 'var(--t2)';
+  });
+  optRenderContracts();
+}
+window.optcSetHorizon = optcSetHorizon;
 
 /** الضغط على عقد يفتح شارت السهم الأساسي في اللوحة المجاورة. */
 function optcOpenChart(sym, strike, type) {
@@ -8362,7 +8474,8 @@ function optcRenderDetail(sym) {
     <div style="${S};border-color:${col}55;background:linear-gradient(135deg,${col}0d,transparent)">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
         <b style="font-size:15px">${sym} ${r.type === 'call' ? 'كول' : 'بوت'} ${optNum(r.strike)}</b>
-        <span style="font-size:11px;color:var(--t3)">استحقاق ${r.expiry} · ${r.sessions} جلسة</span>
+        <span style="background:${r.category === 'يومي' ? 'rgba(251,146,60,.15)' : 'rgba(154,164,184,.15)'};color:${r.category === 'يومي' ? '#fb923c' : '#9aa4b8'};border-radius:5px;padding:2px 9px;font-size:10.5px;font-weight:700">${r.category === 'يومي' ? '⚡ يومي' : '📅 أسبوعي'}</span>
+        <span style="font-size:11px;color:var(--t3)">استحقاق ${r.expiry} · ${r.sessions} جلسة · السعر وقت المسح ${optNum(r.spot)}$</span>
         <span style="background:${col}22;color:${col};border:1px solid ${col}55;border-radius:6px;padding:4px 12px;font-size:12px;font-weight:700">التقييم ${r.score}/100</span>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-top:6px">
@@ -8374,6 +8487,16 @@ function optcRenderDetail(sym) {
         ${optCell('داخل النقد', `${r.probITM ?? '—'}٪`, (r.probITM ?? 0) >= 40 ? '#0ecf7e' : '#f5c842')}
       </div>
     </div>
+
+    ${(() => {
+      const live = G.pr[sym];
+      if (live == null || !(Math.abs(live - r.spot) / r.spot > 0.003)) return '';
+      const moved = +((live - r.spot) / r.spot * 100).toFixed(2);
+      return `<div style="${S};border-color:rgba(245,200,66,.4);background:rgba(245,200,66,.06)">
+        <b style="color:#f5c842">⚠️ السعر تحرّك منذ المسح:</b> كان ${optNum(r.spot)}$ وقت التقييم، والآن ${optNum(live)}$
+        (${moved > 0 ? '+' : ''}${moved}٪) — أعد المسح قبل التنفيذ إن كان الفارق مؤثراً على الاسترايك المختار.
+      </div>`;
+    })()}
 
     <div style="${S}">
       <div style="font-weight:700;margin-bottom:5px;font-size:12px">📊 لماذا هذا العقد تحديداً؟ — التحليل الفني والزمني</div>
@@ -8426,7 +8549,7 @@ function optRenderContracts() {
   const panel = document.getElementById('optc-panel');
   if (!panel) return;
 
-  const pool = OPTC.rows.filter(r => r.oi >= OPTC.minOI);
+  const pool = OPTC.rows.filter(r => r.oi >= OPTC.minOI && (OPTC.horizon === 'all' || r.category === OPTC.horizon));
   const inBudget = pool
     .filter(r => r.costUsd <= OPTC.budget)
     .filter(r => !OPTC.onlyAligned || r.fitScore >= 16)
@@ -8497,14 +8620,27 @@ function optRenderContracts() {
   const th = 'padding:7px 6px;font-size:9.5px;color:var(--t3);font-weight:600;text-align:center;border-bottom:1px solid var(--bd);white-space:nowrap';
   const td = 'padding:7px 6px;font-size:11px;text-align:center;border-bottom:1px solid rgba(255,255,255,.04);white-space:nowrap';
 
+  /* 🛠️ مؤشر حداثة الأسعار — لأن الأسعار وأسعار الاسترايك حسّاسة جداً
+     لكل دقيقة تمرّ على سهم يتحرك بسرعة. الأسعار تُجلَب حيّة عند كل مسح
+     (بعد الإصلاح)، لكن إن ترك المستخدم اللوحة مفتوحة دقائق فالأرقام
+     المعروضة تبقى لحظة المسح لا اللحظة الحالية — فيُقال ذلك صراحةً
+     بدل أن يُكتشف بالمقارنة مع تبويب آخر كما حدث هنا. */
+  const ageMin = OPTC.lastAt ? Math.floor((Date.now() - OPTC.lastAt.getTime()) / 60000) : null;
+  const freshLine = ageMin == null ? '' : ageMin < 2
+    ? `<span style="color:#0ecf7e">● محدَّث الآن</span>`
+    : `<span style="color:${ageMin > 5 ? '#f04458' : '#f5c842'}">● آخر تحديث قبل ${ageMin} دقيقة${ageMin > 5 ? ' — الأسعار قد لا تعكس الحركة الحالية، أعد المسح' : ''}</span>`;
+
   panel.innerHTML = `
     <div style="background:rgba(255,215,0,.05);border:1px solid rgba(255,215,0,.22);border-radius:9px;padding:10px 13px;margin-bottom:11px;font-size:11px;line-height:1.9;color:var(--t2)">
-      <b style="color:#FFD700">${rows.length} عقد</b> — عقد واحد لكل سهم، الأقوى فقط، من ${pool.length} عقداً اجتاز السيولة والعائد
-      ضمن ميزانية <b style="color:#FFD700">${OPTC.budget}$</b>.
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:5px">
+        <span><b style="color:#FFD700">${rows.length} عقد</b> — عقد واحد لكل سهم، الأقوى فقط، من ${pool.length} عقداً اجتاز السيولة والعائد ضمن ميزانية <b style="color:#FFD700">${OPTC.budget}$</b>.</span>
+        <span style="font-size:10.5px;font-weight:700">${freshLine}</span>
+      </div>
       اضغط أي صف ليفتح <b>شارت السهم</b> في اللوحة المجاورة و<b>بطاقة التفصيل</b> أسفل الجدول.
       <br><b style="color:#FFD700">«التقييم»</b> رقم واحد يجمع ثلاثة أبعاد: <b>الفني</b> (الاتجاه ومستويات الدخول/الهدف من الشارت)،
       <b>الزمني</b> (هل الانعطاف المتوقع يقع قبل انتهاء العقد أم بعده)، و<b>المالي</b> (تكلفة العقد وسيولته وتسعير تذبذبه) —
       فالعقد المعروض لكل سهم هو الأقوى على هذه الأبعاد الثلاثة معاً، لا الأرخص ولا الأقرب فقط.
+      <br>⚡ <b>يومي</b> = أقرب استحقاق (0–1 جلسة) لمضاربة الجلسة نفسها · 📅 <b>أسبوعي</b> = 2–12 جلسة.
       <br><b style="color:#FFD700">«الكلفة»</b> هي ما تدفعه فعلاً للعقد الواحد (العلاوة × ١٠٠).
       و<b style="color:#FFD700">«الهدف/الوقف»</b> إعادة تسعير للعقد نفسه عند هدف السهم ووقفه البنيويين مع خصم التآكل الزمني —
       لا نسبة مفروضة من العلاوة.
@@ -8536,7 +8672,7 @@ function optRenderContracts() {
           <td style="${td}"><b style="color:var(--bl)">${r.sym}</b><div style="font-size:9px;color:var(--t3)">${optNum(r.spot)}$</div></td>
           <td style="${td}"><span style="color:${r.type === 'call' ? '#0ecf7e' : '#f04458'};font-weight:700">${r.type === 'call' ? 'كول' : 'بوت'}</span></td>
           <td style="${td}"><b>${optNum(r.strike)}</b><div style="font-size:9px;color:var(--t3)">Δ${optNum(r.delta, 2)}</div></td>
-          <td style="${td}">${r.expiry}<div style="font-size:9px;color:var(--t3)">${r.sessions} جلسة</div></td>
+          <td style="${td}">${r.category === 'يومي' ? '<span style="color:#fb923c;font-weight:700;font-size:9.5px">⚡ يومي</span><br>' : '<span style="color:#9aa4b8;font-size:9.5px">📅 أسبوعي</span><br>'}${r.expiry}<div style="font-size:9px;color:var(--t3)">${r.sessions} جلسة</div></td>
           <td style="${td}"><b style="color:#FFD700;font-size:12.5px">${r.costUsd}$</b><div style="font-size:9px;color:var(--t3)">${optNum(r.bid)}–${optNum(r.ask)}</div></td>
           <td style="${td}"><span style="color:#0ecf7e">${optNum(r.target)}$</span><div style="font-size:9px;color:var(--t3)" title="هدف السهم ${r.uTarget}$ — ${r.targetSrcLbl}">+${r.gainPct}٪ @${optNum(r.uTarget)}</div></td>
           <td style="${td}"><span style="color:#f04458">${optNum(r.stop)}$</span><div style="font-size:9px;color:var(--t3)">−${r.lossPct}٪</div></td>
