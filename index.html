@@ -3645,7 +3645,7 @@ function getHeaders(){
     harmonic:`${base}<th>النموذج</th><th>اكتمال</th><th>الإشارة</th>${end}`,
     hunter:`${base}<th>درجة</th><th>إنذارات</th><th>الحالة</th>${end}`,
     time:`${base}<th onclick="sortResults('time_d')">المسافة الزمنية</th><th>الدورة المطابقة</th><th>الحالة</th><th title="عدد الأدلة الزمنية المستقلة المتوافقة (غان شموع/غان تقويمي/فيبوناتشي/دورة السهم/مربع غان)">قوة التوافق</th>${end}`,
-    radar:`${base}<th title="نوع الانعطاف المتوقع وبُعده بالجلسات">الانعطاف المتوقع</th><th title="نطاق عدم اليقين المقاس — لا تاريخ واحد">النافذة العملية</th><th title="من أين جاء التاريخ: دورة مقاسة على السهم أم رقم مفروض من خارجه">المصدر</th><th title="دورة دالة إحصائياً شيء، ودورة أثبتت إصابتها على بيانات لم ترها شيء آخر">التحقق</th><th title="أقرب دعم إن كان الانعطاف قاعاً، وأقرب مقاومة إن كان قمة">مستوى المراقبة</th><th>التاريخ التقديري</th>`,
+    radar:`${base}<th title="نوع الانعطاف المتوقع وبُعده بالجلسات">الانعطاف المتوقع</th><th title="نطاق عدم اليقين المقاس — لا تاريخ واحد">النافذة العملية</th><th title="من أين جاء التاريخ: دورة مقاسة على السهم أم رقم مفروض من خارجه">المصدر</th><th title="دورة دالة إحصائياً شيء، ودورة أثبتت إصابتها على بيانات لم ترها شيء آخر">التحقق</th><th title="أقرب دعم إن كان الانعطاف قاعاً، وأقرب مقاومة إن كان قمة">مستوى المراقبة</th><th>التاريخ التقديري</th><th title="بطاقة قابلة للتحميل والمشاركة: دخول/وقف/هدف ومصدر كل رقم">🎴 بطاقة</th>`,
     sniper:`${base}<th onclick="sortResults('snp')">Sniper Score</th><th>المتوافقة</th><th>الحالة</th>${end}`,
     fib618:`${base}<th onclick="sortResults('fib_s')">مستوى فيبوناتشي</th><th>المسافة</th><th>الحالة</th>${end}`,
     falsebreak:`${base}<th onclick="sortResults('fb_s')">المستوى المكسور</th><th>النوع</th><th>الحالة</th>${end}`,
@@ -8758,6 +8758,345 @@ window.optcToggleAligned = optcToggleAligned;
 window.optChartFit = optChartFit;
 
 /* ══════════════════════════════════════════════════════════════════════
+   🎴 مولّد بطاقة المشاركة — Canvas → PNG + نصوص جاهزة
+   ──────────────────────────────────────────────────────────────────────
+   زر على كل صف في الرادار يرسم بطاقة فيها: الرمز والاسم، الدخول، الوقف،
+   الهدف، العائد/المخاطرة، ومصدر كل رقم — مع نصّ تغريدة ونصّ تلقرام جاهزين
+   للنسخ. المستخدم يراجع وينشر يدوياً؛ لا نشر تلقائي من هنا إطلاقاً.
+
+   مصدر كل رقم مكتوب صراحة تحت الرقم نفسه على البطاقة، لا في مكان منفصل:
+   من أين جاء الدخول (نطاق بنيوي/اختراق/ارتداد)، ومن أين الوقف (تحت أي
+   دعم وكم لمسة)، ومن أين الهدف (قمة متأرجحة أم امتداد R). وبطاقة تحليل
+   زمني مصغّرة إن وُجد انعطاف مقاس، بنفس تحفّظ بطاقة "متى ينشط هذا السهم".
+   ══════════════════════════════════════════════════════════════════════ */
+
+const SHARE = { canvas: null, data: null, tweetText: '', tgText: '' };
+
+const SC = {
+  W: 900, H: 1160,
+  bg0: '#04060e', bg1: '#0c1020', bg2: '#111628', bg3: '#172030',
+  bd: 'rgba(255,255,255,.09)',
+  t1: '#dde3f0', t2: '#7a8ba8', t3: '#3d4a5e',
+  up: '#0ecf7e', dn: '#f04458', bl: '#4a9eff', gd: '#f5c842', cy: '#22d3ee', or: '#fb923c'
+};
+
+/** يجمّع كل بيانات البطاقة من مصادرها الحقيقية — لا أرقام مُدخَلة يدوياً. */
+function shareCardData(sym, radarRow) {
+  const price = G.pr[sym] || 0, pct = G.pc[sym] || 0;
+  const name = NAMES[sym] || sym;
+  const ep = buildEntryPlan(sym, { minRR: 1.6 });
+  const ta = (() => { try { return timeActivation(sym); } catch (e) { return null; } })();
+
+  let action = { label: '👁 مراقبة', color: SC.t2, bg: 'rgba(154,164,184,.14)' };
+  if (ep) {
+    if (price >= ep.entryLo && price <= (ep.chaseCap ?? ep.entryHi) && price <= ep.entryHi * 1.02) {
+      action = { label: '🚀 شراء — جاهز', color: SC.up, bg: 'rgba(14,207,126,.16)' };
+    } else if (ep.chaseCap != null && price > ep.chaseCap) {
+      action = { label: '⏳ تجاوز نطاق الدخول', color: SC.or, bg: 'rgba(251,146,60,.16)' };
+    } else if (price < ep.entryLo) {
+      action = { label: '⏳ بانتظار الارتداد/الاختراق', color: SC.gd, bg: 'rgba(245,200,66,.16)' };
+    }
+  }
+
+  return { sym, name, price, pct, ep, ta, action, radarRow: radarRow || null, generatedAt: new Date() };
+}
+
+function _scRounded(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+/** شريط شموع مصغّر من بيانات حقيقية — لا تزيين، آخر ~60 جلسة. */
+function _scDrawMiniChart(ctx, cs, x, y, w, h) {
+  if (!cs || cs.length < 5) return;
+  const slice = cs.slice(-60);
+  const hi = Math.max(...slice.map(c => c.high)), lo = Math.min(...slice.map(c => c.low));
+  const span = Math.max(1e-6, hi - lo);
+  const cw = w / slice.length;
+  const yOf = p => y + h - ((p - lo) / span) * h;
+
+  ctx.strokeStyle = SC.bd; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const gy = y + (h / 4) * i;
+    ctx.beginPath(); ctx.moveTo(x, gy); ctx.lineTo(x + w, gy); ctx.stroke();
+  }
+  slice.forEach((c, i) => {
+    const cx = x + i * cw + cw / 2;
+    const up = c.close >= c.open;
+    ctx.strokeStyle = up ? SC.up : SC.dn;
+    ctx.fillStyle = up ? SC.up : SC.dn;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx, yOf(c.high)); ctx.lineTo(cx, yOf(c.low)); ctx.stroke();
+    const bw = Math.max(1.5, cw * 0.6);
+    const yTop = yOf(Math.max(c.open, c.close)), yBot = yOf(Math.min(c.open, c.close));
+    ctx.fillRect(cx - bw / 2, yTop, bw, Math.max(1, yBot - yTop));
+  });
+}
+
+/** يرسم البطاقة كاملة على Canvas ويعيده مع النصوص الجاهزة للنشر. */
+function drawShareCard(sym, radarRow) {
+  const d = shareCardData(sym, radarRow);
+  const canvas = document.createElement('canvas');
+  canvas.width = SC.W; canvas.height = SC.H;
+  const ctx = canvas.getContext('2d');
+
+  /* خلفية متدرّجة */
+  const grad = ctx.createLinearGradient(0, 0, 0, SC.H);
+  grad.addColorStop(0, SC.bg1); grad.addColorStop(1, SC.bg0);
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, SC.W, SC.H);
+
+  ctx.textBaseline = 'alphabetic';
+  const PAD = 44;
+  let y = 56;
+
+  /* ── الترويسة ── */
+  ctx.fillStyle = SC.gd; ctx.font = '700 20px "IBM Plex Mono", monospace';
+  ctx.textAlign = 'right'; ctx.fillText('⚡ TADAWUL FILTERS PRO — US MARKET', SC.W - PAD, y);
+  ctx.fillStyle = SC.t3; ctx.font = '13px Tahoma'; ctx.textAlign = 'left';
+  const dstr = d.generatedAt.toLocaleDateString('ar-EG', { weekday: 'long', day: '2-digit', month: 'long' });
+  ctx.fillText(dstr, PAD, y);
+  y += 26;
+  ctx.strokeStyle = SC.bd; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(SC.W - PAD, y); ctx.stroke();
+  y += 56;
+
+  /* ── الرمز والسعر ── */
+  ctx.textAlign = 'right';
+  ctx.fillStyle = SC.t1; ctx.font = '700 56px "IBM Plex Mono", monospace';
+  ctx.fillText(d.sym, SC.W - PAD, y);
+  ctx.font = '20px Tahoma'; ctx.fillStyle = SC.t2;
+  ctx.fillText(d.name, SC.W - PAD, y + 30);
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = SC.t1; ctx.font = '700 40px "IBM Plex Mono", monospace';
+  ctx.fillText(`${d.price.toFixed(2)}$`, PAD, y);
+  ctx.fillStyle = d.pct >= 0 ? SC.up : SC.dn; ctx.font = '700 20px "IBM Plex Mono", monospace';
+  ctx.fillText(`${d.pct >= 0 ? '▲+' : '▼'}${d.pct.toFixed(2)}%`, PAD, y + 30);
+  y += 64;
+
+  /* ── شارة الإجراء ── */
+  ctx.font = '700 22px Tahoma';
+  const albl = d.action.label;
+  const atw = ctx.measureText(albl).width + 56;
+  ctx.fillStyle = d.action.bg; _scRounded(ctx, (SC.W - atw) / 2, y, atw, 46, 23); ctx.fill();
+  ctx.fillStyle = d.action.color; ctx.textAlign = 'center';
+  ctx.fillText(albl, SC.W / 2, y + 31);
+  y += 76;
+
+  /* ── شبكة الأرقام: دخول / وقف / هدف / عائد-مخاطرة، مع مصدر كل رقم ── */
+  const ep = d.ep;
+  const boxW = (SC.W - PAD * 2 - 24) / 4, boxH = 148;
+  const boxes = ep ? [
+    { label: 'نطاق الدخول', val: `${ep.entryLo}–${ep.entryHi}`, sub: ep.style === 'breakout' ? 'اختراق مقاومة' : ep.style === 'bounce' ? 'ارتداد من دعم' : 'عند السعر', col: SC.gd },
+    { label: 'الوقف', val: `${ep.stop}`, sub: ep.stopSrc.length > 34 ? ep.stopSrc.slice(0, 32) + '…' : ep.stopSrc, col: SC.dn },
+    { label: 'الهدف', val: `${ep.targets[0]?.price ?? '—'}`, sub: (ep.targets[0]?.src || '').length > 34 ? ep.targets[0].src.slice(0, 32) + '…' : (ep.targets[0]?.src || '—'), col: SC.up },
+    { label: 'عائد/مخاطرة', val: `${ep.targets[0]?.rr ?? '—'}R`, sub: ep.chaseCap ? `سقف مطاردة ${ep.chaseCap}` : 'من الهدف الأول', col: SC.bl }
+  ] : [
+    { label: 'نطاق الدخول', val: '—', sub: 'بيانات غير كافية', col: SC.t3 },
+    { label: 'الوقف', val: '—', sub: '—', col: SC.t3 },
+    { label: 'الهدف', val: '—', sub: '—', col: SC.t3 },
+    { label: 'عائد/مخاطرة', val: '—', sub: '—', col: SC.t3 }
+  ];
+  boxes.forEach((b, i) => {
+    const bx = PAD + i * (boxW + 8);
+    ctx.fillStyle = SC.bg2; _scRounded(ctx, bx, y, boxW, boxH, 10); ctx.fill();
+    ctx.strokeStyle = SC.bd; ctx.lineWidth = 1; _scRounded(ctx, bx, y, boxW, boxH, 10); ctx.stroke();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = SC.t3; ctx.font = '13px Tahoma';
+    ctx.fillText(b.label, bx + boxW / 2, y + 26);
+    ctx.fillStyle = b.col; ctx.font = '700 25px "IBM Plex Mono", monospace';
+    ctx.fillText(b.val, bx + boxW / 2, y + 66);
+    ctx.fillStyle = SC.t2; ctx.font = '11.5px Tahoma';
+    _scWrapCenter(ctx, b.sub, bx + boxW / 2, y + 96, boxW - 14, 15, 3);
+  });
+  y += boxH + 40;
+
+  /* ── التوقيت: من نفس محرّك «متى ينشط هذا السهم» — نفس التحفّظ نفسه ── */
+  if (d.ta) {
+    const ta = d.ta;
+    ctx.fillStyle = SC.bg2; _scRounded(ctx, PAD, y, SC.W - PAD * 2, 118, 10); ctx.fill();
+    ctx.strokeStyle = ta.color + '55'; ctx.lineWidth = 1.5; _scRounded(ctx, PAD, y, SC.W - PAD * 2, 118, 10); ctx.stroke();
+    ctx.textAlign = 'right';
+    ctx.fillStyle = ta.color; ctx.font = '700 16px Tahoma';
+    ctx.fillText(`${ta.icon} متى ينشط هذا السهم زمنياً؟`, SC.W - PAD - 20, y + 30);
+    ctx.fillStyle = SC.t1; ctx.font = '15px Tahoma';
+    _scWrapRTL(ctx, ta.headline, SC.W - PAD - 20, y + 56, SC.W - PAD * 2 - 40, 22, 2);
+    if (ta.watch) {
+      ctx.fillStyle = SC.t2; ctx.font = '12.5px Tahoma';
+      ctx.fillText(`🎚 مستوى المراقبة: ${ta.watch.price}$ (${ta.watch.label})`, SC.W - PAD - 20, y + 102);
+    }
+    y += 118 + 28;
+  }
+
+  /* ── شارت مصغّر ── */
+  const chH = 190;
+  ctx.fillStyle = SC.bg2; _scRounded(ctx, PAD, y, SC.W - PAD * 2, chH, 10); ctx.fill();
+  ctx.strokeStyle = SC.bd; ctx.lineWidth = 1; _scRounded(ctx, PAD, y, SC.W - PAD * 2, chH, 10); ctx.stroke();
+  _scDrawMiniChart(ctx, G.cans[sym], PAD + 16, y + 14, SC.W - PAD * 2 - 32, chH - 30);
+  y += chH + 32;
+
+  /* ── تذييل ── */
+  ctx.textAlign = 'center'; ctx.fillStyle = SC.t3; ctx.font = '12.5px Tahoma';
+  ctx.fillText('⚠️ للمناقشة والمتابعة فقط — ليست توصية استثمارية. تحقّق من السعر قبل أي قرار.', SC.W / 2, SC.H - 40);
+  ctx.fillStyle = SC.t2; ctx.font = '700 13px Tahoma';
+  ctx.fillText('u511.vercel.app', SC.W / 2, SC.H - 18);
+
+  /* ── نصوص المشاركة ── */
+  const tweetText = _scTweetText(d);
+  const tgText = _scTelegramText(d);
+
+  SHARE.canvas = canvas; SHARE.data = d; SHARE.tweetText = tweetText; SHARE.tgText = tgText;
+  return { canvas, data: d, tweetText, tgText };
+}
+
+function _scWrapRTL(ctx, text, xRight, y, maxW, lh, maxLines) {
+  const words = String(text).split(' ');
+  let line = '', lines = [];
+  for (const w of words) {
+    const test = line ? line + ' ' + w : w;
+    if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = w; }
+    else line = test;
+    if (lines.length >= maxLines) break;
+  }
+  if (line && lines.length < maxLines) lines.push(line);
+  lines.forEach((l, i) => ctx.fillText(l, xRight, y + i * lh));
+}
+function _scWrapCenter(ctx, text, xCenter, y, maxW, lh, maxLines) {
+  const words = String(text).split(' ');
+  let line = '', lines = [];
+  for (const w of words) {
+    const test = line ? line + ' ' + w : w;
+    if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = w; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+  lines = lines.slice(0, maxLines);
+  lines.forEach((l, i) => ctx.fillText(l, xCenter, y + i * lh));
+}
+
+function _scTweetText(d) {
+  const ep = d.ep;
+  if (!ep) return `${d.sym} ${d.name} — ${d.price.toFixed(2)}$ (${d.pct >= 0 ? '+' : ''}${d.pct.toFixed(2)}٪)\n\n⚠️ للمناقشة فقط، ليست توصية.`;
+  const t = ep.targets[0];
+  return [
+    `${d.action.label} — $${d.sym}`,
+    `${d.price.toFixed(2)}$ (${d.pct >= 0 ? '+' : ''}${d.pct.toFixed(2)}٪)`,
+    ``,
+    `دخول: ${ep.entryLo}–${ep.entryHi} (${ep.style === 'breakout' ? 'اختراق' : ep.style === 'bounce' ? 'ارتداد' : 'حالي'})`,
+    `وقف: ${ep.stop}`,
+    `هدف: ${t?.price ?? '—'} (${t?.rr ?? '—'}R)`,
+    ``,
+    `⚠️ للمناقشة والمتابعة فقط — ليست توصية استثمارية.`,
+    `#${d.sym} #الأسهم_الأمريكية`
+  ].join('\n');
+}
+
+function _scTelegramText(d) {
+  const ep = d.ep, ta = d.ta;
+  if (!ep) return `📊 <b>${d.sym}</b> — ${d.name}\nالسعر: ${d.price.toFixed(2)}$ (${d.pct >= 0 ? '+' : ''}${d.pct.toFixed(2)}٪)\n\n⚠️ بيانات غير كافية لخطة كاملة حالياً.`;
+  const t = ep.targets[0];
+  const lines = [
+    `📊 <b>${d.sym}</b> — ${d.name}`,
+    `${d.action.label}`,
+    `السعر: <b>${d.price.toFixed(2)}$</b> (${d.pct >= 0 ? '+' : ''}${d.pct.toFixed(2)}٪)`,
+    ``,
+    `🎯 <b>نطاق الدخول:</b> ${ep.entryLo} – ${ep.entryHi}`,
+    `   ↳ ${ep.entryWhy}`,
+    `🛑 <b>الوقف:</b> ${ep.stop}`,
+    `   ↳ ${ep.stopSrc}`,
+    `🏁 <b>الهدف:</b> ${t?.price ?? '—'} (عائد ${t?.rr ?? '—'}R)`,
+    `   ↳ ${t?.src ?? '—'}`,
+  ];
+  if (ep.chaseCap) lines.push(`⚠️ لا تشترِ فوق ${ep.chaseCap}$`);
+  if (ta) {
+    lines.push(``, `⏰ <b>التوقيت:</b> ${ta.headline}`);
+  }
+  lines.push(``, `⚠️ <i>للمناقشة والمتابعة فقط — ليست توصية استثمارية. تحقّق من السعر قبل أي قرار.</i>`, `📡 u511.vercel.app`);
+  return lines.join('\n');
+}
+
+/** يفتح نافذة المعاينة — نفس نافذة تقرير التحليل الزمني، مُعاد استعمالها. */
+function openShareCard(sym, radarRow) {
+  const { canvas, tweetText, tgText } = drawShareCard(sym, radarRow || null);
+  const overlay = document.getElementById('tar-overlay');
+  const title = document.getElementById('tar-title');
+  const body = document.getElementById('tar-body');
+  if (!overlay || !body) return;
+  title.textContent = `🎴 بطاقة مشاركة — ${sym}`;
+
+  const dataURL = canvas.toDataURL('image/png');
+  body.innerHTML = `
+    <div style="text-align:center;margin-bottom:14px">
+      <img src="${dataURL}" style="max-width:100%;border-radius:10px;border:1px solid rgba(255,255,255,.1);box-shadow:0 8px 30px rgba(0,0,0,.4)">
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+      <button onclick="shareDownloadPNG('${sym}')" style="flex:1;min-width:140px;background:rgba(245,200,66,.16);border:1px solid rgba(245,200,66,.4);color:#f5c842;padding:10px;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;font-size:13px">⬇️ تحميل PNG</button>
+      <button onclick="shareCopyText('tweet',this)" style="flex:1;min-width:140px;background:rgba(74,158,255,.16);border:1px solid rgba(74,158,255,.4);color:#4a9eff;padding:10px;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;font-size:13px">📋 نسخ نص تويتر</button>
+      <button onclick="shareCopyText('tg',this)" style="flex:1;min-width:140px;background:rgba(14,207,126,.16);border:1px solid rgba(14,207,126,.4);color:#0ecf7e;padding:10px;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;font-size:13px">📋 نسخ نص تلقرام</button>
+    </div>
+
+    <div style="margin-bottom:14px">
+      <div style="font-size:12px;font-weight:700;color:#4a9eff;margin-bottom:6px">📝 نص تويتر (راجعه قبل النشر)</div>
+      <textarea id="sc-tweet" style="width:100%;min-height:120px;background:#0c1020;border:1px solid rgba(74,158,255,.3);border-radius:8px;color:#dde3f0;padding:10px;font-family:inherit;font-size:12.5px;line-height:1.7;resize:vertical" dir="auto">${tweetText.replace(/</g, '&lt;')}</textarea>
+    </div>
+    <div>
+      <div style="font-size:12px;font-weight:700;color:#0ecf7e;margin-bottom:6px">📝 نص تلقرام (يدعم HTML — راجعه قبل النشر)</div>
+      <textarea id="sc-tg" style="width:100%;min-height:190px;background:#0c1020;border:1px solid rgba(14,207,126,.3);border-radius:8px;color:#dde3f0;padding:10px;font-family:inherit;font-size:12.5px;line-height:1.7;resize:vertical" dir="auto">${tgText.replace(/</g, '&lt;')}</textarea>
+    </div>
+    <div style="margin-top:12px;font-size:11px;color:var(--t3);line-height:1.8">
+      كل رقم على البطاقة من نفس محرّك المنصة (خطة الدخول البنيوية والتحليل الزمني) — لا رقم يُدخَل يدوياً.
+      عدّل النص في الصناديق أعلاه ثم انسخ؛ لا نشر تلقائي من هنا.
+    </div>`;
+  overlay.style.display = 'block';
+}
+
+function shareDownloadPNG(sym) {
+  if (!SHARE.canvas) return;
+  const a = document.createElement('a');
+  a.download = `${sym}_${new Date().toISOString().slice(0, 10)}.png`;
+  a.href = SHARE.canvas.toDataURL('image/png');
+  a.click();
+}
+
+function shareCopyText(which, btn) {
+  const id = which === 'tweet' ? 'sc-tweet' : 'sc-tg';
+  const el = document.getElementById(id);
+  if (!el) return;
+  const done = (ok) => {
+    if (!btn) return;
+    const old = btn.textContent;
+    btn.textContent = ok ? '✅ نُسخ' : '⚠️ انسخ يدوياً (حُدِّد النص)';
+    setTimeout(() => btn.textContent = old, ok ? 1400 : 2400);
+  };
+  /* 🛡️ execCommand غير مضمون في كل بيئة (بعض المتصفحات المدمجة داخل
+     تطبيقات، أو صفحات بلا HTTPS تفتقد Clipboard API الحديثة أيضاً).
+     كان المسار البديل يستدعيها بلا حماية، فيرمي استثناءً غير مُمسَك
+     يُسقط الزر بصمت. الآن أي فشل يُحدِّد النص للمستخدم وينبّهه للنسخ
+     يدوياً بدل أن يظن أن الزر لا يعمل. */
+  const legacyFallback = () => {
+    try {
+      el.focus(); el.select();
+      const ok = typeof document.execCommand === 'function' && document.execCommand('copy');
+      done(!!ok);
+    } catch (e) { el.focus(); el.select(); done(false); }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(el.value).then(() => done(true)).catch(legacyFallback);
+  } else legacyFallback();
+}
+
+window.shareCardData = shareCardData;
+window.drawShareCard = drawShareCard;
+window.openShareCard = openShareCard;
+window.shareDownloadPNG = shareDownloadPNG;
+window.shareCopyText = shareCopyText;
+
+/* ══════════════════════════════════════════════════════════════════════
    🎯 نموذج الدخول والأهداف — أُعيد بناؤه من الصفر
    ──────────────────────────────────────────────────────────────────────
    الشكوى كانت: «نقطة الدخول والأهداف سيئة». والسبب ثلاثة عيوب بنيوية في
@@ -9617,7 +9956,7 @@ async function radarCompute(force) {
 function radarRenderTable() {
   const body = document.getElementById('rtbody');
   if (!body) return;
-  const COLS = 10;
+  const COLS = 11;
 
   if (!RADAR.ran) {
     body.innerHTML = `<tr><td colspan="${COLS}" style="padding:26px;text-align:center;color:var(--t3);line-height:2">
@@ -9708,6 +10047,8 @@ function radarRenderTable() {
            <span style="color:var(--t3);font-size:calc(var(--base-font)*0.72)">${r.watch.distPct > 0 ? '+' : ''}${r.watch.distPct}٪</span>`
         : '<span style="color:var(--t3)">—</span>'}</td>
       <td style="font-family:monospace;color:var(--t2)">${r.date}</td>
+      <td><button onclick="event.stopPropagation();openShareCard('${r.sym}')"
+        style="background:rgba(245,200,66,.14);border:1px solid rgba(245,200,66,.4);color:#f5c842;padding:5px 10px;border-radius:6px;cursor:pointer;font-family:inherit;font-size:11px;font-weight:700;white-space:nowrap">🎴 بطاقة</button></td>
     </tr>`;
   }).join('');
 }
