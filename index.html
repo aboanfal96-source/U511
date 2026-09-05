@@ -8202,8 +8202,24 @@ async function optScanContracts() {
     if (OPTC.cancel) break;
     const sym = list[i];
     if (prog) prog.innerHTML = `يقيّم سلاسل ${sym} … <b>${i + 1}/${list.length}</b> · <span style="color:#FFD700">${rows.length} عقد</span>`;
+    const symRows = await optEvaluateSymbol(sym, st);
+    rows.push(...symRows.slice(0, OPTC.poolPerSym));
+    await new Promise(r => setTimeout(r, 180));   /* المزوّد المجاني يخنق التلاحق */
+    if (i % 3 === 2) { OPTC.rows = rows.slice(); optRenderContracts(); }
+  }
+  return _optScanFinish(rows, list);
+}
 
-    try {
+/** يقيّم كل عقود سهم واحد ويعيدها مرتَّبة بالأقوى أولاً — نفس الجسم
+ *  الذي كان داخل حلقة المسح حرفياً، أُخرِج دالةً مستقلة حتى تستدعيه
+ *  بطاقة المشاركة لجلب أفضل عقد للسهم المعروض بلا تشغيل مسح كامل.
+ *  st اختياري: مرِّره من المسح الشامل لتراكم الإحصاء المشترك، أو اتركه
+ *  فيُنشأ عدّاد مستقل لاستدعاء منفرد. */
+async function optEvaluateSymbol(sym, stExternal) {
+  const st = stExternal || { seen: 0, noPrice: 0, overBudget: 0, thinOI: 0, wideSpread: 0, worthless: 0, badRR: 0, kept: 0, syms: 0 };
+  const O = window.KSAEngine?.Options;
+  if (!O) return [];
+  try {
       /* 🛠️ إصلاح جوهري: كان الشرط `!G.cans[sym] || length<60` يعني أن أي
          سهم مُحمَّل مسبقاً (وهذا كل الرموز عملياً بعد أول مسح في الجلسة)
          لا يُعاد جلبه إطلاقاً — فيُقيَّم كل عقد على سعر لحظة قديمة بينما
@@ -8212,7 +8228,7 @@ async function optScanContracts() {
          السعر الذي قِيس الاسترايك مقابله. كل رمز يُعاد جلبه الآن حيّاً
          عند كل مسح — تماماً كما يفعل «المسح الشامل» لنفس السبب. */
       await loadStock(sym);
-      if (G.demo.has(sym)) continue;
+      if (G.demo.has(sym)) return [];
 
       const fit = optChartFit(sym);
       /* الاتجاه: من الشارت، أو مفروض من المستخدم */
@@ -8220,7 +8236,7 @@ async function optScanContracts() {
 
       let expiries = OPT.expiries[sym];
       if (!expiries) { const probe = await optFetchChain(sym, null); expiries = probe.expiries; }
-      if (!expiries || !expiries.length) continue;
+      if (!expiries || !expiries.length) return [];
 
       /* ══ عقود يومية وأسبوعية معاً — لا الأسبوعية وحدها ══
          المستخدم يريد مضاربة السهم واليوم معاً. النافذة القديمة
@@ -8238,7 +8254,7 @@ async function optScanContracts() {
         if (picksDaily.length >= 1 && picksWeekly.length >= 2) break;
       }
       const picks = [...picksDaily, ...picksWeekly];
-      if (!picks.length) continue;
+      if (!picks.length) return [];
 
       const cs = G.cans[sym];
       const spot = G.pr[sym] || cs[cs.length - 1].close;
@@ -8380,14 +8396,18 @@ async function optScanContracts() {
 
       symRows.sort((a, b) => b.score - a.score);
       if (symRows.length) st.syms++;
-      rows.push(...symRows.slice(0, OPTC.poolPerSym));
-    } catch (e) {
-      OPT.errors[sym] = e.message || 'فشل';
-    }
-    await new Promise(r => setTimeout(r, 180));   /* المزوّد المجاني يخنق التلاحق */
-    if (i % 3 === 2) { OPTC.rows = rows.slice(); optRenderContracts(); }
+      return symRows;
+  } catch (e) {
+    OPT.errors[sym] = e.message || 'فشل';
+    return [];
   }
+}
 
+/** ذيل المسح الشامل: الترخية التلقائية عند الفراغ، ثم الإعلان عن
+ *  الانتهاء وعرض النتائج. مُستخرَجة من optScanContracts لتبقى الدالة
+ *  الرئيسية قصيرة ومقروءة بعد فصل جسم تقييم الرمز الواحد عنها. */
+function _optScanFinish(rows, list) {
+  const prog = document.getElementById('optc-prog');
   /* ── ترخية تلقائية ──
      جدول فارغ بلا سبب هو أسوأ مخرَج ممكن: يفهمه المستخدم على أنه «لا
      فرص»، والحقيقة غالباً أن عتبة داخلية ابتلعت كل شيء. إن خرج المجمّع
@@ -8398,7 +8418,7 @@ async function optScanContracts() {
     const el1 = document.getElementById('optc-oi'); if (el1) el1.value = 10;
     _radarProgOptc('لا عقد اجتاز العتبات — يُعاد المسح بعتبات مُرخاة تلقائياً…');
     OPTC.busy = false;
-    return optScanContracts(false);
+    return optScanContracts();
   }
 
   OPTC.rows = rows;
@@ -8782,7 +8802,25 @@ const SC = {
 };
 
 /** يجمّع كل بيانات البطاقة من مصادرها الحقيقية — لا أرقام مُدخَلة يدوياً. */
-function shareCardData(sym, radarRow) {
+/** أفضل عقد أوبشن للسهم — من نفس محرّك الماسح (فني + زمني + مالي معاً)،
+ *  لا حساب منفصل. يعيد استعمال مسح حديث (أقل من 3 دقائق) إن وُجد فيه
+ *  هذا الرمز، وإلا يجلب سلسلته حيّة الآن وحدها — مع تفريغ أي ذاكرة
+ *  مؤقتة قديمة لها تحديداً، بنفس منطق «لا سلسلة عقود مجمَّدة» المطبَّق
+ *  على المسح الشامل. */
+async function shareBestContract(sym) {
+  try {
+    if (OPTC.ran && OPTC.lastAt && (Date.now() - OPTC.lastAt.getTime()) < 3 * 60000) {
+      const cand = OPTC.rows.filter(r => r.sym === sym).sort((a, b) => b.score - a.score)[0];
+      if (cand) return cand;
+    }
+    Object.keys(OPT.chains).forEach(k => { if (k.startsWith(sym + '|')) delete OPT.chains[k]; });
+    delete OPT.expiries[sym];
+    const rows = await optEvaluateSymbol(sym);
+    return rows[0] || null;
+  } catch (e) { return null; }
+}
+
+function shareCardData(sym, radarRow, contract) {
   const price = G.pr[sym] || 0, pct = G.pc[sym] || 0;
   const name = NAMES[sym] || sym;
   const ep = buildEntryPlan(sym, { minRR: 1.6 });
@@ -8815,7 +8853,7 @@ function shareCardData(sym, radarRow) {
     }
   } catch (e) { }
 
-  return { sym, name, price, pct, ep, ta, action, badges, radarRow: radarRow || null, generatedAt: new Date() };
+  return { sym, name, price, pct, ep, ta, action, badges, contract: contract || null, radarRow: radarRow || null, generatedAt: new Date() };
 }
 
 function _scRounded(ctx, x, y, w, h, r) {
@@ -8884,8 +8922,8 @@ function _scDrawMiniChart(ctx, cs, x, y, w, h, ep) {
 }
 
 /** يرسم البطاقة كاملة على Canvas ويعيده مع النصوص الجاهزة للنشر. */
-function drawShareCard(sym, radarRow) {
-  const d = shareCardData(sym, radarRow);
+function drawShareCard(sym, radarRow, contract) {
+  const d = shareCardData(sym, radarRow, contract);
   const ep = d.ep;
   /* عدد صناديق الأرقام يتغيّر: هدفان بنيويان حقيقيان → خمسة صناديق
      (نصف/باقي) كما في نسخة السوق السعودي؛ هدف واحد فقط → أربعة. هذا
@@ -8893,6 +8931,7 @@ function drawShareCard(sym, radarRow) {
   const twoTargets = !!(ep && ep.targets && ep.targets[1] && ep.targets[1].structural);
   const nBoxes = twoTargets ? 5 : 4;
   const hasBadges = d.badges && d.badges.length;
+  const OPT_BOX_H = 168; /* ارتفاع صندوق أفضل عقد أوبشن، إن طُلب */
 
   /* ── الارتفاع الفعلي، لا تقدير تقريبي ──
      كان تقديراً ثابتاً يفترض وجود كل الأقسام الاختيارية معاً، فينتج
@@ -8904,9 +8943,10 @@ function drawShareCard(sym, radarRow) {
   hAcc += hasBadges ? (34 + 22) : 10;
   hAcc += 150 + 32;
   if (ep && ep.targets[0]) hAcc += 30;
+  hAcc += OPT_BOX_H + 26; /* صندوق أفضل عقد أوبشن — دائم على البطاقة، إما بعقد حقيقي أو برسالة صريحة بغيابه */
   if (d.ta) hAcc += 118 + 28;
   hAcc += 250 + 32;
-  const FOOT_H = 70;
+  const FOOT_H = 96;
   const totalH = hAcc + FOOT_H;
 
   const canvas = document.createElement('canvas');
@@ -9015,6 +9055,44 @@ function drawShareCard(sym, radarRow) {
     y += 30;
   }
 
+  /* ── أفضل عقد أوبشن — من نفس تقييم الماسح (فني + زمني + مالي معاً
+     وأعلى فوليوم بين المرشّحين)، لا حساب منفصل. تُعرض دائماً، وبصراحة
+     تامة حين لا يوجد عقد يجتاز شروط السيولة والعائد — لا عقد مختلَق. */
+  {
+    const c = d.contract;
+    ctx.fillStyle = SC.bg2; _scRounded(ctx, PAD, y, SC.W - PAD * 2, OPT_BOX_H, 10); ctx.fill();
+    ctx.strokeStyle = (c ? SC.gd : SC.t3) + '55'; ctx.lineWidth = 1.5; _scRounded(ctx, PAD, y, SC.W - PAD * 2, OPT_BOX_H, 10); ctx.stroke();
+    ctx.textAlign = 'right'; ctx.fillStyle = SC.gd; ctx.font = '700 16px Tahoma';
+    ctx.fillText('🎟️ أفضل عقد أوبشن — فني + زمني + مالي وفوليوم', SC.W - PAD - 20, y + 28);
+    if (c) {
+      ctx.fillStyle = c.type === 'call' ? SC.up : SC.dn; ctx.font = '700 24px "IBM Plex Mono", monospace';
+      ctx.fillText(`${c.type === 'call' ? 'كول' : 'بوت'} ${c.strike}`, SC.W - PAD - 20, y + 62);
+      ctx.fillStyle = SC.t2; ctx.font = '13px Tahoma';
+      ctx.fillText(`استحقاق ${c.expiry} (${c.category === 'يومي' ? '⚡ يومي' : '📅 أسبوعي'}، ${c.sessions} جلسة) · تقييم ${c.score}/100`, SC.W - PAD - 20, y + 84);
+
+      const cw2 = (SC.W - PAD * 2 - 40 - 24) / 4;
+      const cbx = PAD + 20;
+      const stats = [
+        { l: 'الكلفة', v: `${c.costUsd}$`, col: SC.t1 },
+        { l: 'الهدف', v: `${c.target}$`, col: SC.up },
+        { l: 'الوقف', v: `${c.stop}$`, col: SC.dn },
+        { l: 'فوليوم اليوم', v: `${(c.volume || 0).toLocaleString('en')}`, col: SC.cy }
+      ];
+      stats.forEach((s2, i2) => {
+        const sx = cbx + i2 * (cw2 + 8);
+        ctx.textAlign = 'center';
+        ctx.fillStyle = SC.t3; ctx.font = '11.5px Tahoma'; ctx.fillText(s2.l, sx + cw2 / 2, y + 108);
+        ctx.fillStyle = s2.col; ctx.font = '700 15px "IBM Plex Mono", monospace'; ctx.fillText(s2.v, sx + cw2 / 2, y + 130);
+      });
+      ctx.textAlign = 'right'; ctx.fillStyle = SC.t3; ctx.font = '11px Tahoma';
+      ctx.fillText(`فائدة مفتوحة ${(c.oi || 0).toLocaleString('en')} · عائد/مخاطرة ${c.rr}R · احتمال داخل النقد ${c.probITM ?? '—'}٪`, SC.W - PAD - 20, y + 154);
+    } else {
+      ctx.fillStyle = SC.t2; ctx.font = '13.5px Tahoma';
+      _scWrapRTL(ctx, 'لا عقد أوبشن يجتاز شروط السيولة والعائد على هذا السهم حالياً — بيانات غير كافية أو سوق العقود ضعيف السيولة.', SC.W - PAD - 20, y + 60, SC.W - PAD * 2 - 40, 22, 3);
+    }
+    y += OPT_BOX_H + 26;
+  }
+
   /* ── التوقيت: من نفس محرّك «متى ينشط هذا السهم» — نفس التحفّظ نفسه ── */
   if (d.ta) {
     const ta = d.ta;
@@ -9047,6 +9125,9 @@ function drawShareCard(sym, radarRow) {
   ctx.fillText('⚠️ للمناقشة والمتابعة فقط — ليست توصية استثمارية. تحقّق من السعر قبل أي قرار.', SC.W / 2, y + 30);
   ctx.fillStyle = SC.t2; ctx.font = '700 13px Tahoma';
   ctx.fillText('u511.vercel.app', SC.W / 2, y + 52);
+  /* توقيع المستخدم أسفل البطاقة، بطلب صريح */
+  ctx.fillStyle = SC.gd; ctx.font = '700 15px Tahoma';
+  ctx.fillText('jaser', SC.W / 2, y + 78);
 
   /* ── نصوص المشاركة ── */
   const tweetText = _scTweetText(d);
@@ -9082,8 +9163,11 @@ function _scWrapCenter(ctx, text, xCenter, y, maxW, lh, maxLines) {
 }
 
 function _scTweetText(d) {
-  const ep = d.ep;
-  if (!ep) return `${d.sym} ${d.name} — ${d.price.toFixed(2)}$ (${d.pct >= 0 ? '+' : ''}${d.pct.toFixed(2)}٪)\n\n⚠️ للمناقشة فقط، ليست توصية.`;
+  const ep = d.ep, c = d.contract;
+  const optLine = c
+    ? [``, `🎟️ عقد: ${c.type === 'call' ? 'كول' : 'بوت'} ${c.strike} (${c.expiry}) — ${c.costUsd}$ · هدف ${c.target}$ · وقف ${c.stop}$`]
+    : [];
+  if (!ep) return [`${d.sym} ${d.name} — ${d.price.toFixed(2)}$ (${d.pct >= 0 ? '+' : ''}${d.pct.toFixed(2)}٪)`, ...optLine, ``, `⚠️ للمناقشة فقط، ليست توصية.`].join('\n');
   const t = ep.targets[0];
   return [
     `${d.action.label} — $${d.sym}`,
@@ -9092,6 +9176,7 @@ function _scTweetText(d) {
     `دخول: ${ep.entryLo}–${ep.entryHi} (${ep.style === 'breakout' ? 'اختراق' : ep.style === 'bounce' ? 'ارتداد' : 'حالي'})`,
     `وقف: ${ep.stop}`,
     `هدف: ${t?.price ?? '—'} (${t?.rr ?? '—'}R)`,
+    ...optLine,
     ``,
     `⚠️ للمناقشة والمتابعة فقط — ليست توصية استثمارية.`,
     `#${d.sym} #الأسهم_الأمريكية`
@@ -9099,7 +9184,7 @@ function _scTweetText(d) {
 }
 
 function _scTelegramText(d) {
-  const ep = d.ep, ta = d.ta;
+  const ep = d.ep, ta = d.ta, c = d.contract;
   if (!ep) return `📊 <b>${d.sym}</b> — ${d.name}\nالسعر: ${d.price.toFixed(2)}$ (${d.pct >= 0 ? '+' : ''}${d.pct.toFixed(2)}٪)\n\n⚠️ بيانات غير كافية لخطة كاملة حالياً.`;
   const t = ep.targets[0];
   const lines = [
@@ -9115,21 +9200,34 @@ function _scTelegramText(d) {
     `   ↳ ${t?.src ?? '—'}`,
   ];
   if (ep.chaseCap) lines.push(`⚠️ لا تشترِ فوق ${ep.chaseCap}$`);
+  if (c) {
+    lines.push(``, `🎟️ <b>أفضل عقد أوبشن</b> (تقييم ${c.score}/100 — فني+زمني+مالي+فوليوم):`,
+      `   ↳ ${c.type === 'call' ? 'كول' : 'بوت'} ${c.strike} · استحقاق ${c.expiry} (${c.category}) · تكلفة ${c.costUsd}$`,
+      `   ↳ هدف العقد ${c.target}$ · وقف العقد ${c.stop}$ · عائد/مخاطرة ${c.rr}R · فوليوم ${(c.volume || 0).toLocaleString('en')}`);
+  } else {
+    lines.push(``, `🎟️ لا عقد أوبشن يجتاز شروط السيولة والعائد حالياً.`);
+  }
   if (ta) {
     lines.push(``, `⏰ <b>التوقيت:</b> ${ta.headline}`);
   }
-  lines.push(``, `⚠️ <i>للمناقشة والمتابعة فقط — ليست توصية استثمارية. تحقّق من السعر قبل أي قرار.</i>`, `📡 u511.vercel.app`);
+  lines.push(``, `⚠️ <i>للمناقشة والمتابعة فقط — ليست توصية استثمارية. تحقّق من السعر قبل أي قرار.</i>`, `📡 u511.vercel.app`, `jaser`);
   return lines.join('\n');
 }
 
 /** يفتح نافذة المعاينة — نفس نافذة تقرير التحليل الزمني، مُعاد استعمالها. */
-function openShareCard(sym, radarRow) {
-  const { canvas, tweetText, tgText } = drawShareCard(sym, radarRow || null);
+async function openShareCard(sym, radarRow) {
   const overlay = document.getElementById('tar-overlay');
   const title = document.getElementById('tar-title');
   const body = document.getElementById('tar-body');
   if (!overlay || !body) return;
   title.textContent = `🎴 بطاقة مشاركة — ${sym}`;
+  /* جلب أفضل عقد أوبشن يحتاج شبكة أحياناً (سلسلة عقود حيّة)، فتُعرض
+     حالة تحميل صريحة بدل تجميد الواجهة بلا تفسير. */
+  body.innerHTML = `<div style="text-align:center;padding:70px 20px;color:var(--t2);font-size:13px">⏳ يجهّز البطاقة ويقيّم أفضل عقد أوبشن (فني + زمني + مالي + فوليوم)…</div>`;
+  overlay.style.display = 'block';
+
+  const contract = await shareBestContract(sym).catch(() => null);
+  const { canvas, tweetText, tgText } = drawShareCard(sym, radarRow || null, contract);
 
   const dataURL = canvas.toDataURL('image/png');
   body.innerHTML = `
@@ -9151,10 +9249,9 @@ function openShareCard(sym, radarRow) {
       <textarea id="sc-tg" style="width:100%;min-height:190px;background:#0c1020;border:1px solid rgba(14,207,126,.3);border-radius:8px;color:#dde3f0;padding:10px;font-family:inherit;font-size:12.5px;line-height:1.7;resize:vertical" dir="auto">${tgText.replace(/</g, '&lt;')}</textarea>
     </div>
     <div style="margin-top:12px;font-size:11px;color:var(--t3);line-height:1.8">
-      كل رقم على البطاقة من نفس محرّك المنصة (خطة الدخول البنيوية والتحليل الزمني) — لا رقم يُدخَل يدوياً.
+      كل رقم على البطاقة من نفس محرّك المنصة (خطة الدخول البنيوية، والتحليل الزمني، وماسح العقود) — لا رقم يُدخَل يدوياً.
       عدّل النص في الصناديق أعلاه ثم انسخ؛ لا نشر تلقائي من هنا.
     </div>`;
-  overlay.style.display = 'block';
 }
 
 function shareDownloadPNG(sym) {
