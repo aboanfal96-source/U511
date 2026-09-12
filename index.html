@@ -8802,29 +8802,87 @@ const SC = {
 };
 
 /** يجمّع كل بيانات البطاقة من مصادرها الحقيقية — لا أرقام مُدخَلة يدوياً. */
-/** أفضل عقد أوبشن للسهم — من نفس محرّك الماسح (فني + زمني + مالي معاً)،
- *  لا حساب منفصل. يعيد استعمال مسح حديث (أقل من 3 دقائق) إن وُجد فيه
- *  هذا الرمز، وإلا يجلب سلسلته حيّة الآن وحدها — مع تفريغ أي ذاكرة
- *  مؤقتة قديمة لها تحديداً، بنفس منطق «لا سلسلة عقود مجمَّدة» المطبَّق
- *  على المسح الشامل. */
-async function shareBestContract(sym) {
+/** أفضل عقدَي أوبشن للسهم — يومي وأسبوعي معاً، كلٌّ من فئته، لا عقد واحد
+ *  يخفي الآخر. من نفس محرّك الماسح (فني + زمني + مالي + فوليوم معاً)،
+ *  لا حساب منفصل، وبنفس قاعدة الماسح: عقد واحد فقط لكل فئة لكل سهم —
+ *  الأقوى تقييماً ضمنها، لا تكرار ولا بدائل مبعثرة على البطاقة.
+ *  يعيد استعمال مسح حديث (أقل من 3 دقائق) إن وُجد فيه هذا الرمز، وإلا
+ *  يجلب سلسلته حيّة الآن وحدها — مع تفريغ أي ذاكرة مؤقتة قديمة لها
+ *  تحديداً، بنفس منطق «لا سلسلة عقود مجمَّدة» المطبَّق على المسح الشامل. */
+async function shareBestContracts(sym) {
   try {
-    if (OPTC.ran && OPTC.lastAt && (Date.now() - OPTC.lastAt.getTime()) < 3 * 60000) {
-      const cand = OPTC.rows.filter(r => r.sym === sym).sort((a, b) => b.score - a.score)[0];
-      if (cand) return cand;
+    let rows;
+    const fresh = OPTC.ran && OPTC.lastAt && (Date.now() - OPTC.lastAt.getTime()) < 3 * 60000;
+    if (fresh && OPTC.rows.some(r => r.sym === sym)) {
+      rows = OPTC.rows.filter(r => r.sym === sym);
+    } else {
+      Object.keys(OPT.chains).forEach(k => { if (k.startsWith(sym + '|')) delete OPT.chains[k]; });
+      delete OPT.expiries[sym];
+      rows = await optEvaluateSymbol(sym);
     }
-    Object.keys(OPT.chains).forEach(k => { if (k.startsWith(sym + '|')) delete OPT.chains[k]; });
-    delete OPT.expiries[sym];
-    const rows = await optEvaluateSymbol(sym);
-    return rows[0] || null;
-  } catch (e) { return null; }
+    rows = (rows || []).slice().sort((a, b) => b.score - a.score);
+    return {
+      daily: rows.find(r => r.category === 'يومي') || null,
+      weekly: rows.find(r => r.category === 'أسبوعي') || null
+    };
+  } catch (e) { return { daily: null, weekly: null }; }
 }
 
-function shareCardData(sym, radarRow, contract) {
+/** أهداف السهم من عدة مدارس تحليل مستقلة — لا مدرسة واحدة تحتكر «الهدف».
+ *  كل مدرسة تُحسب من نفس بيانات الشارت لكن بمنهج مختلف تماماً عن غيرها:
+ *   📐 البنيوي     — أقرب قمة متأرجحة حقيقية (buildEntryPlan/swingLevels)
+ *   🦋 الفراكتالي  — فراكتال بيل ويليامز غير المكسور (KSAEngine.fractalTargets)
+ *   📊 الإحصائي    — نطاق القيمة (حجم تداول + قناة انحدار) (KSAEngine.valueBand)
+ *   📈 التنبؤي     — ARIMA(1,1,0) بفاصل ثقة 95٪ (KSAEngine.forecastARIMA)
+ *  أي مدرسة تعجز عن إنتاج هدف فوق السعر تُستبعد بصراحة، لا تُملأ بتخمين —
+ *  نفس مبدأ المنصة كلها: لا رقم بلا مصدر محسوب. */
+function computeSchoolTargets(sym, ep) {
+  const cs = G.cans[sym];
+  if (!cs || cs.length < 30) return [];
+  const price = G.pr[sym] || cs[cs.length - 1].close;
+  if (!(price > 0)) return [];
+  const out = [];
+
+  if (ep && ep.targets && ep.targets[0] && ep.targets[0].price > price) {
+    out.push({ icon: '📐', school: 'البنيوي', target: ep.targets[0].price, note: ep.targets[0].src });
+  }
+  try {
+    const fr = ddFrac(sym);
+    if (fr && fr.ok && fr.target > price) {
+      out.push({ icon: '🦋', school: 'الفراكتالي', target: fr.target, note: fr.targetSource || 'فراكتال بيل ويليامز' });
+    }
+  } catch (e) { }
+  try {
+    const vb = calculateValueBand(cs);
+    if (vb && vb.ok) {
+      const candidates = [vb.bandHigh, vb.regressionHigh, vb.valueArea ? vb.valueArea.high : null].filter(v => isNum(v) && v > price);
+      if (candidates.length) out.push({ icon: '📊', school: 'الإحصائي (حجم + انحدار)', target: +Math.max(...candidates).toFixed(2), note: 'أعلى مراسي نطاق القيمة المرجعي' });
+    }
+  } catch (e) { }
+  try {
+    const closes = cs.map(c => c.close);
+    const fc = predictPriceARIMA(closes, 5);
+    if (fc && fc.ok) {
+      const t = fc.meaningful && isNum(fc.hi) ? fc.hi : fc.forecast;
+      if (isNum(t) && t > price) {
+        out.push({ icon: '📈', school: 'التنبؤي (ARIMA)', target: +t.toFixed(2),
+          note: fc.meaningful ? 'الحد الأعلى لفاصل ثقة 95٪ خلال 5 جلسات' : 'تنبؤ غير مميَّز إحصائياً عن ثبات السعر — إرشادي فقط' });
+      }
+    }
+  } catch (e) { }
+
+  return out.map(t => ({ ...t, distPct: +(((t.target - price) / price) * 100).toFixed(2) }))
+    .sort((a, b) => a.target - b.target);
+}
+
+function isNum(v) { return typeof v === 'number' && isFinite(v); }
+
+function shareCardData(sym, radarRow, contracts) {
   const price = G.pr[sym] || 0, pct = G.pc[sym] || 0;
   const name = NAMES[sym] || sym;
   const ep = buildEntryPlan(sym, { minRR: 1.6 });
   const ta = (() => { try { return timeActivation(sym); } catch (e) { return null; } })();
+  const schools = (() => { try { return computeSchoolTargets(sym, ep); } catch (e) { return []; } })();
 
   let action = { label: '👁 مراقبة', color: SC.t2, bg: 'rgba(154,164,184,.14)' };
   if (ep) {
@@ -8853,7 +8911,9 @@ function shareCardData(sym, radarRow, contract) {
     }
   } catch (e) { }
 
-  return { sym, name, price, pct, ep, ta, action, badges, contract: contract || null, radarRow: radarRow || null, generatedAt: new Date() };
+  return { sym, name, price, pct, ep, ta, action, badges, schools,
+    contracts: contracts || { daily: null, weekly: null },
+    radarRow: radarRow || null, generatedAt: new Date() };
 }
 
 function _scRounded(ctx, x, y, w, h, r) {
@@ -8921,9 +8981,48 @@ function _scDrawMiniChart(ctx, cs, x, y, w, h, ep) {
   });
 }
 
+/** يرسم صندوق عقد أوبشن واحد (يومي أو أسبوعي) — مُستخرَجة كدالة مستقلة
+ *  حتى يُعرض العقدان جنباً إلى جنب بلا تكرار كود. تُصرِّح بصراحة تامة
+ *  حين لا يوجد عقد يجتاز شروط السيولة والعائد ضمن هذه الفئة — لا عقد
+ *  مختلَق فقط لملء الصندوق. */
+function _scDrawContractBox(ctx, x, y, w, h, title, c) {
+  ctx.fillStyle = SC.bg2; _scRounded(ctx, x, y, w, h, 10); ctx.fill();
+  ctx.strokeStyle = (c ? SC.gd : SC.t3) + '55'; ctx.lineWidth = 1.5; _scRounded(ctx, x, y, w, h, 10); ctx.stroke();
+  const pad = 16;
+  ctx.textAlign = 'right'; ctx.fillStyle = SC.gd; ctx.font = '700 14px Tahoma';
+  ctx.fillText(title, x + w - pad, y + 24);
+  if (!c) {
+    ctx.fillStyle = SC.t2; ctx.font = '12.5px Tahoma';
+    _scWrapRTL(ctx, 'لا عقد يجتاز شروط السيولة والعائد ضمن هذه الفئة حالياً.', x + w - pad, y + 56, w - pad * 2, 20, 4);
+    return;
+  }
+  ctx.fillStyle = c.type === 'call' ? SC.up : SC.dn; ctx.font = '700 19px "IBM Plex Mono", monospace';
+  ctx.fillText(`${c.type === 'call' ? 'كول' : 'بوت'} ${c.strike}`, x + w - pad, y + 52);
+  ctx.fillStyle = SC.t2; ctx.font = '11.5px Tahoma';
+  ctx.fillText(`استحقاق ${c.expiry} · ${c.sessions} جلسة · تقييم ${c.score}/100`, x + w - pad, y + 72);
+
+  const cw2 = (w - pad * 2 - 8) / 2;
+  const stats = [
+    { l: 'الكلفة', v: `${c.costUsd}$`, col: SC.t1 },
+    { l: 'الهدف', v: `${c.target}$`, col: SC.up },
+    { l: 'الوقف', v: `${c.stop}$`, col: SC.dn },
+    { l: '🔥 فوليوم اليوم', v: `${(c.volume || 0).toLocaleString('en')}`, col: SC.cy }
+  ];
+  stats.forEach((s2, i2) => {
+    const col2 = i2 % 2, row2 = Math.floor(i2 / 2);
+    const sx = x + pad + col2 * (cw2 + 8);
+    const sy = y + 96 + row2 * 44;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = SC.t3; ctx.font = '10.5px Tahoma'; ctx.fillText(s2.l, sx + cw2 / 2, sy);
+    ctx.fillStyle = s2.col; ctx.font = '700 14px "IBM Plex Mono", monospace'; ctx.fillText(s2.v, sx + cw2 / 2, sy + 20);
+  });
+  ctx.textAlign = 'right'; ctx.fillStyle = SC.t3; ctx.font = '10px Tahoma';
+  ctx.fillText(`فائدة مفتوحة ${(c.oi || 0).toLocaleString('en')} · ع/م ${c.rr}R · داخل النقد ${c.probITM ?? '—'}٪`, x + w - pad, y + h - 12);
+}
+
 /** يرسم البطاقة كاملة على Canvas ويعيده مع النصوص الجاهزة للنشر. */
-function drawShareCard(sym, radarRow, contract) {
-  const d = shareCardData(sym, radarRow, contract);
+function drawShareCard(sym, radarRow, contracts) {
+  const d = shareCardData(sym, radarRow, contracts);
   const ep = d.ep;
   /* عدد صناديق الأرقام يتغيّر: هدفان بنيويان حقيقيان → خمسة صناديق
      (نصف/باقي) كما في نسخة السوق السعودي؛ هدف واحد فقط → أربعة. هذا
@@ -8931,7 +9030,10 @@ function drawShareCard(sym, radarRow, contract) {
   const twoTargets = !!(ep && ep.targets && ep.targets[1] && ep.targets[1].structural);
   const nBoxes = twoTargets ? 5 : 4;
   const hasBadges = d.badges && d.badges.length;
-  const OPT_BOX_H = 168; /* ارتفاع صندوق أفضل عقد أوبشن، إن طُلب */
+  const OPT_BOX_H = 208; /* ارتفاع صندوقَي أفضل عقد يومي وأفضل عقد أسبوعي، جنباً إلى جنب */
+  const SCHOOLS_ROW_H = 32;
+  const hasSchools = d.schools && d.schools.length;
+  const SCHOOLS_BOX_H = hasSchools ? (56 + d.schools.length * SCHOOLS_ROW_H) : 0;
 
   /* ── الارتفاع الفعلي، لا تقدير تقريبي ──
      كان تقديراً ثابتاً يفترض وجود كل الأقسام الاختيارية معاً، فينتج
@@ -8943,7 +9045,8 @@ function drawShareCard(sym, radarRow, contract) {
   hAcc += hasBadges ? (34 + 22) : 10;
   hAcc += 150 + 32;
   if (ep && ep.targets[0]) hAcc += 30;
-  hAcc += OPT_BOX_H + 26; /* صندوق أفضل عقد أوبشن — دائم على البطاقة، إما بعقد حقيقي أو برسالة صريحة بغيابه */
+  hAcc += OPT_BOX_H + 26; /* صندوقا أفضل عقد يومي وأسبوعي — دائمان على البطاقة، بعقد حقيقي أو برسالة صريحة بغيابه */
+  if (hasSchools) hAcc += SCHOOLS_BOX_H + 26; /* أهداف السهم بجميع المدارس — تُعرض فقط حين توجد مدرسة واحدة على الأقل أنتجت هدفاً */
   if (d.ta) hAcc += 118 + 28;
   hAcc += 250 + 32;
   const FOOT_H = 96;
@@ -9055,42 +9158,37 @@ function drawShareCard(sym, radarRow, contract) {
     y += 30;
   }
 
-  /* ── أفضل عقد أوبشن — من نفس تقييم الماسح (فني + زمني + مالي معاً
-     وأعلى فوليوم بين المرشّحين)، لا حساب منفصل. تُعرض دائماً، وبصراحة
-     تامة حين لا يوجد عقد يجتاز شروط السيولة والعائد — لا عقد مختلَق. */
+  /* ── أفضل عقدَي أوبشن — يومي وأسبوعي جنباً إلى جنب، كلٌّ من نفس تقييم
+     الماسح (فني + زمني + مالي وأعلى فوليوم بين المرشّحين ضمن فئته)، لا
+     حساب منفصل، وعقد واحد فقط لكل فئة — لا تكرار على نفس السهم. تُعرض
+     دائماً، وبصراحة تامة حين لا يوجد عقد يجتاز شروط السيولة والعائد
+     ضمن فئة ما — لا عقد مختلَق. */
   {
-    const c = d.contract;
-    ctx.fillStyle = SC.bg2; _scRounded(ctx, PAD, y, SC.W - PAD * 2, OPT_BOX_H, 10); ctx.fill();
-    ctx.strokeStyle = (c ? SC.gd : SC.t3) + '55'; ctx.lineWidth = 1.5; _scRounded(ctx, PAD, y, SC.W - PAD * 2, OPT_BOX_H, 10); ctx.stroke();
-    ctx.textAlign = 'right'; ctx.fillStyle = SC.gd; ctx.font = '700 16px Tahoma';
-    ctx.fillText('🎟️ أفضل عقد أوبشن — فني + زمني + مالي وفوليوم', SC.W - PAD - 20, y + 28);
-    if (c) {
-      ctx.fillStyle = c.type === 'call' ? SC.up : SC.dn; ctx.font = '700 24px "IBM Plex Mono", monospace';
-      ctx.fillText(`${c.type === 'call' ? 'كول' : 'بوت'} ${c.strike}`, SC.W - PAD - 20, y + 62);
-      ctx.fillStyle = SC.t2; ctx.font = '13px Tahoma';
-      ctx.fillText(`استحقاق ${c.expiry} (${c.category === 'يومي' ? '⚡ يومي' : '📅 أسبوعي'}، ${c.sessions} جلسة) · تقييم ${c.score}/100`, SC.W - PAD - 20, y + 84);
-
-      const cw2 = (SC.W - PAD * 2 - 40 - 24) / 4;
-      const cbx = PAD + 20;
-      const stats = [
-        { l: 'الكلفة', v: `${c.costUsd}$`, col: SC.t1 },
-        { l: 'الهدف', v: `${c.target}$`, col: SC.up },
-        { l: 'الوقف', v: `${c.stop}$`, col: SC.dn },
-        { l: 'فوليوم اليوم', v: `${(c.volume || 0).toLocaleString('en')}`, col: SC.cy }
-      ];
-      stats.forEach((s2, i2) => {
-        const sx = cbx + i2 * (cw2 + 8);
-        ctx.textAlign = 'center';
-        ctx.fillStyle = SC.t3; ctx.font = '11.5px Tahoma'; ctx.fillText(s2.l, sx + cw2 / 2, y + 108);
-        ctx.fillStyle = s2.col; ctx.font = '700 15px "IBM Plex Mono", monospace'; ctx.fillText(s2.v, sx + cw2 / 2, y + 130);
-      });
-      ctx.textAlign = 'right'; ctx.fillStyle = SC.t3; ctx.font = '11px Tahoma';
-      ctx.fillText(`فائدة مفتوحة ${(c.oi || 0).toLocaleString('en')} · عائد/مخاطرة ${c.rr}R · احتمال داخل النقد ${c.probITM ?? '—'}٪`, SC.W - PAD - 20, y + 154);
-    } else {
-      ctx.fillStyle = SC.t2; ctx.font = '13.5px Tahoma';
-      _scWrapRTL(ctx, 'لا عقد أوبشن يجتاز شروط السيولة والعائد على هذا السهم حالياً — بيانات غير كافية أو سوق العقود ضعيف السيولة.', SC.W - PAD - 20, y + 60, SC.W - PAD * 2 - 40, 22, 3);
-    }
+    const gap = 16, boxW2 = (SC.W - PAD * 2 - gap) / 2;
+    _scDrawContractBox(ctx, PAD, y, boxW2, OPT_BOX_H, '⚡ أفضل عقد يومي', d.contracts.daily);
+    _scDrawContractBox(ctx, PAD + boxW2 + gap, y, boxW2, OPT_BOX_H, '📅 أفضل عقد أسبوعي', d.contracts.weekly);
     y += OPT_BOX_H + 26;
+  }
+
+  /* ── أهداف السهم بجميع المدارس — كل مدرسة تحليل بحسابها المستقل، لا
+     مدرسة واحدة تحتكر «الهدف»: البنيوي، الفراكتالي، الإحصائي (حجم
+     وانحدار)، والتنبؤي (ARIMA). يُحذف الصندوق كاملاً إن لم تُنتج أي
+     مدرسة هدفاً — لا صف فارغ ولا تخمين. */
+  if (hasSchools) {
+    ctx.fillStyle = SC.bg2; _scRounded(ctx, PAD, y, SC.W - PAD * 2, SCHOOLS_BOX_H, 10); ctx.fill();
+    ctx.strokeStyle = SC.cy + '55'; ctx.lineWidth = 1.5; _scRounded(ctx, PAD, y, SC.W - PAD * 2, SCHOOLS_BOX_H, 10); ctx.stroke();
+    ctx.textAlign = 'right'; ctx.fillStyle = SC.cy; ctx.font = '700 16px Tahoma';
+    ctx.fillText('🎯 أهداف السهم — كل المدارس', SC.W - PAD - 20, y + 28);
+    d.schools.forEach((s, i) => {
+      const ry = y + 44 + i * SCHOOLS_ROW_H + 18;
+      ctx.textAlign = 'right'; ctx.fillStyle = SC.t1; ctx.font = '13px Tahoma';
+      ctx.fillText(`${s.icon} ${s.school}`, SC.W - PAD - 20, ry);
+      ctx.textAlign = 'left'; ctx.fillStyle = SC.up; ctx.font = '700 15px "IBM Plex Mono", monospace';
+      ctx.fillText(`${s.target}$`, PAD + 20 + 90, ry);
+      ctx.fillStyle = SC.t3; ctx.font = '11.5px Tahoma';
+      ctx.fillText(`+${s.distPct}٪`, PAD + 20, ry);
+    });
+    y += SCHOOLS_BOX_H + 26;
   }
 
   /* ── التوقيت: من نفس محرّك «متى ينشط هذا السهم» — نفس التحفّظ نفسه ── */
@@ -9162,12 +9260,19 @@ function _scWrapCenter(ctx, text, xCenter, y, maxW, lh, maxLines) {
   lines.forEach((l, i) => ctx.fillText(l, xCenter, y + i * lh));
 }
 
+/** سطر عقد مضغوط لنصوص المشاركة — نفس الحقول لكلا الفئتين. */
+function _scContractLine(icon, label, c) {
+  if (!c) return `${icon} لا عقد ${label} يجتاز شروط السيولة والعائد حالياً.`;
+  return `${icon} ${label}: ${c.type === 'call' ? 'كول' : 'بوت'} ${c.strike} (${c.expiry}) — ${c.costUsd}$ · هدف ${c.target}$ · وقف ${c.stop}$ · فوليوم ${(c.volume || 0).toLocaleString('en')}`;
+}
+
 function _scTweetText(d) {
-  const ep = d.ep, c = d.contract;
-  const optLine = c
-    ? [``, `🎟️ عقد: ${c.type === 'call' ? 'كول' : 'بوت'} ${c.strike} (${c.expiry}) — ${c.costUsd}$ · هدف ${c.target}$ · وقف ${c.stop}$`]
+  const ep = d.ep, cd = d.contracts.daily, cw = d.contracts.weekly;
+  const optLines = [``, _scContractLine('⚡', 'عقد يومي', cd), _scContractLine('📅', 'عقد أسبوعي', cw)];
+  const schoolLines = (d.schools && d.schools.length)
+    ? [``, `🎯 أهداف كل المدارس: ${d.schools.map(s => `${s.icon} ${s.school} ${s.target}$`).join(' · ')}`]
     : [];
-  if (!ep) return [`${d.sym} ${d.name} — ${d.price.toFixed(2)}$ (${d.pct >= 0 ? '+' : ''}${d.pct.toFixed(2)}٪)`, ...optLine, ``, `⚠️ للمناقشة فقط، ليست توصية.`].join('\n');
+  if (!ep) return [`${d.sym} ${d.name} — ${d.price.toFixed(2)}$ (${d.pct >= 0 ? '+' : ''}${d.pct.toFixed(2)}٪)`, ...optLines, ...schoolLines, ``, `⚠️ للمناقشة فقط، ليست توصية.`].join('\n');
   const t = ep.targets[0];
   return [
     `${d.action.label} — $${d.sym}`,
@@ -9176,7 +9281,8 @@ function _scTweetText(d) {
     `دخول: ${ep.entryLo}–${ep.entryHi} (${ep.style === 'breakout' ? 'اختراق' : ep.style === 'bounce' ? 'ارتداد' : 'حالي'})`,
     `وقف: ${ep.stop}`,
     `هدف: ${t?.price ?? '—'} (${t?.rr ?? '—'}R)`,
-    ...optLine,
+    ...optLines,
+    ...schoolLines,
     ``,
     `⚠️ للمناقشة والمتابعة فقط — ليست توصية استثمارية.`,
     `#${d.sym} #الأسهم_الأمريكية`
@@ -9184,7 +9290,7 @@ function _scTweetText(d) {
 }
 
 function _scTelegramText(d) {
-  const ep = d.ep, ta = d.ta, c = d.contract;
+  const ep = d.ep, ta = d.ta, cd = d.contracts.daily, cw = d.contracts.weekly;
   if (!ep) return `📊 <b>${d.sym}</b> — ${d.name}\nالسعر: ${d.price.toFixed(2)}$ (${d.pct >= 0 ? '+' : ''}${d.pct.toFixed(2)}٪)\n\n⚠️ بيانات غير كافية لخطة كاملة حالياً.`;
   const t = ep.targets[0];
   const lines = [
@@ -9200,12 +9306,20 @@ function _scTelegramText(d) {
     `   ↳ ${t?.src ?? '—'}`,
   ];
   if (ep.chaseCap) lines.push(`⚠️ لا تشترِ فوق ${ep.chaseCap}$`);
-  if (c) {
-    lines.push(``, `🎟️ <b>أفضل عقد أوبشن</b> (تقييم ${c.score}/100 — فني+زمني+مالي+فوليوم):`,
-      `   ↳ ${c.type === 'call' ? 'كول' : 'بوت'} ${c.strike} · استحقاق ${c.expiry} (${c.category}) · تكلفة ${c.costUsd}$`,
-      `   ↳ هدف العقد ${c.target}$ · وقف العقد ${c.stop}$ · عائد/مخاطرة ${c.rr}R · فوليوم ${(c.volume || 0).toLocaleString('en')}`);
+  lines.push(``, `🎟️ <b>أفضل العقود</b> (فني+زمني+مالي+فوليوم، عقد واحد لكل فئة):`);
+  if (cd) {
+    lines.push(`   ⚡ <b>يومي:</b> ${cd.type === 'call' ? 'كول' : 'بوت'} ${cd.strike} · استحقاق ${cd.expiry} · تكلفة ${cd.costUsd}$ · هدف ${cd.target}$ · وقف ${cd.stop}$ · ع/م ${cd.rr}R · فوليوم ${(cd.volume || 0).toLocaleString('en')} · تقييم ${cd.score}/100`);
   } else {
-    lines.push(``, `🎟️ لا عقد أوبشن يجتاز شروط السيولة والعائد حالياً.`);
+    lines.push(`   ⚡ لا عقد يومي يجتاز شروط السيولة والعائد حالياً.`);
+  }
+  if (cw) {
+    lines.push(`   📅 <b>أسبوعي:</b> ${cw.type === 'call' ? 'كول' : 'بوت'} ${cw.strike} · استحقاق ${cw.expiry} · تكلفة ${cw.costUsd}$ · هدف ${cw.target}$ · وقف ${cw.stop}$ · ع/م ${cw.rr}R · فوليوم ${(cw.volume || 0).toLocaleString('en')} · تقييم ${cw.score}/100`);
+  } else {
+    lines.push(`   📅 لا عقد أسبوعي يجتاز شروط السيولة والعائد حالياً.`);
+  }
+  if (d.schools && d.schools.length) {
+    lines.push(``, `🎯 <b>أهداف السهم — كل المدارس:</b>`);
+    d.schools.forEach(s => lines.push(`   ↳ ${s.icon} ${s.school}: ${s.target}$ (+${s.distPct}٪) — ${s.note}`));
   }
   if (ta) {
     lines.push(``, `⏰ <b>التوقيت:</b> ${ta.headline}`);
@@ -9221,13 +9335,13 @@ async function openShareCard(sym, radarRow) {
   const body = document.getElementById('tar-body');
   if (!overlay || !body) return;
   title.textContent = `🎴 بطاقة مشاركة — ${sym}`;
-  /* جلب أفضل عقد أوبشن يحتاج شبكة أحياناً (سلسلة عقود حيّة)، فتُعرض
-     حالة تحميل صريحة بدل تجميد الواجهة بلا تفسير. */
-  body.innerHTML = `<div style="text-align:center;padding:70px 20px;color:var(--t2);font-size:13px">⏳ يجهّز البطاقة ويقيّم أفضل عقد أوبشن (فني + زمني + مالي + فوليوم)…</div>`;
+  /* جلب أفضل عقدَي أوبشن (يومي وأسبوعي) يحتاج شبكة أحياناً (سلسلة عقود
+     حيّة)، فتُعرض حالة تحميل صريحة بدل تجميد الواجهة بلا تفسير. */
+  body.innerHTML = `<div style="text-align:center;padding:70px 20px;color:var(--t2);font-size:13px">⏳ يجهّز البطاقة ويقيّم أفضل عقدَي أوبشن — يومي وأسبوعي (فني + زمني + مالي + فوليوم)…</div>`;
   overlay.style.display = 'block';
 
-  const contract = await shareBestContract(sym).catch(() => null);
-  const { canvas, tweetText, tgText } = drawShareCard(sym, radarRow || null, contract);
+  const contracts = await shareBestContracts(sym).catch(() => ({ daily: null, weekly: null }));
+  const { canvas, tweetText, tgText } = drawShareCard(sym, radarRow || null, contracts);
 
   const dataURL = canvas.toDataURL('image/png');
   body.innerHTML = `
