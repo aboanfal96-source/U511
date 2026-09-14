@@ -1427,7 +1427,7 @@ function optEnsureDom() {
   cbar.id = 'optc-bar';
   cbar.style.cssText = 'display:none;padding:8px 12px;border-bottom:1px solid var(--bd);align-items:center;gap:8px;flex-wrap:wrap;background:linear-gradient(135deg,rgba(255,215,0,.09),rgba(34,211,238,.03))';
   cbar.innerHTML = `
-    <button onclick="optScanContracts()" class="scan-btn" style="background:rgba(255,215,0,.16);border:1px solid rgba(255,215,0,.45);color:#FFD700;flex-shrink:0;font-weight:700">🎟️ امسح كل العقود</button>
+    <button onclick="optScanContractsUser()" class="scan-btn" style="background:rgba(255,215,0,.16);border:1px solid rgba(255,215,0,.45);color:#FFD700;flex-shrink:0;font-weight:700">🎟️ امسح كل العقود</button>
     <button onclick="optcStop()" class="scan-btn" style="background:rgba(240,68,88,.1);border:1px solid rgba(240,68,88,.3);color:#f04458;flex-shrink:0">⏹</button>
     <span class="hgroup"><span>💵 ميزانية العقد $</span>
       <input id="optc-budget" type="number" value="1200" step="50" min="20" dir="ltr"
@@ -1449,6 +1449,7 @@ function optEnsureDom() {
       <button class="optc-h" data-h="أسبوعي" onclick="optcSetHorizon('أسبوعي',this)" style="padding:4px 10px;font-size:10px;font-family:inherit;border:none;background:transparent;color:var(--t2);cursor:pointer">📅 أسبوعي</button>
     </div>
     <button onclick="optcToggleAligned(this)" class="scan-btn" style="background:transparent;border:1px solid var(--bd2);color:var(--t2);flex-shrink:0" title="لا يُعرض إلا عقد يوافق اتجاه الشارت ودورته الزمنية">📊 المتوافقة مع الشارت فقط</button>
+    <button id="optc-audit-btn" onclick="optcToggleStrictAudit(this)" class="scan-btn" style="background:rgba(14,207,126,.14);border:1px solid rgba(14,207,126,.4);color:#0ecf7e;flex-shrink:0" title="يرفض العقود كاملةً بلا فوليوم اليوم، بلا عرض شراء حقيقي، بتذبذب ضمني منتفخ، بتعادل غير واقعي، أو على سهم بلا إجماع اتجاهي حاسم — لا يكتفي بخصم نقاط">🛡️ تدقيق صارم</button>
     <span id="optc-prog" style="font-size:10px;color:var(--t2);margin-right:auto;flex:1;min-width:160px">لم يبدأ — اضغط «امسح كل العقود»</span>`;
   wrap.parentElement.insertBefore(cbar, wrap);
 
@@ -8066,6 +8067,18 @@ const OPTC = {
   detail: null,         /* الرمز المفتوحة تفاصيله حالياً، إن وُجد */
   sort: 'best',         /* best | volume | cheap | prob */
   onlyAligned: false,   /* العقود المتوافقة مع الشارت فقط */
+  /* ══ تدقيق العقود الصارم — بوابات قاطعة، لا مجرد خصم نقاط ══
+     المضاربة اليومية والأسبوعية تحديداً لا تحتمل عقداً بلا سوق فعلي
+     اليوم، أو بفارق تسعير يبتلع الحافة، أو باتجاه بلا إجماع فني، أو
+     بتذبذب ضمني منتفخ يجعل انهياره بعد أي حدث يلتهم الربح رغم صحة
+     الاتجاه. هذه بوابات رفض كاملة على مستوى العقد/السهم، لا نقاط تُخصم
+     من تقييم يبقى العقد ظاهراً معها. */
+  strictAudit: true,    /* 🛡️ تشغيل بوابات التدقيق أدناه؛ إيقافها يعيد السلوك القديم (خصم نقاط فقط) */
+  minVolume: 1,         /* أقل فوليوم اليوم — عقد بفوليوم صفر لا سوق فعلي فيه الآن مهما كانت فائدته المفتوحة قديمة */
+  requireBid: true,     /* رفض أي عقد بلا عرض شراء حقيقي (bid=0) — لا يمكن الخروج منه فوراً بسعر حقيقي */
+  maxIvHv: 2.2,          /* رفض تذبذب ضمني يتجاوز 2.2× التذبذب الفعلي — مخاطرة انهيار تذبذب حادة */
+  maxBeVsEm: 2.0,        /* رفض عقد يحتاج تعادله حركة تفوق ضِعف ما يسعّره السوق نفسه حتى الاستحقاق */
+  minAgreement: 70,      /* أقل إجماع اتجاهي (من optDirection) لتقييم عقود السهم أصلاً — أقل من هذا "مقامرة" باتجاه غير حاسم */
   lastAt: null
 };
 
@@ -8174,6 +8187,16 @@ function optChartFit(sym) {
   return out;
 }
 
+/** غلاف زر المسح اليدوي: يعيد ضبط رخصة «الترخية التلقائية» مرة واحدة
+ *  لكل مسح صريح يطلبه المستخدم، حتى لا يعلق المسح على تدقيق مُخفَّف من
+ *  محاولة سابقة بصمت. النداء الداخلي المتكرّر من _optScanFinish نفسه
+ *  يستدعي optScanContracts مباشرة، لا هذا الغلاف، فلا تُعاد الرخصة له. */
+function optScanContractsUser() {
+  OPTC._autoRelaxed = false;
+  return optScanContracts();
+}
+window.optScanContractsUser = optScanContractsUser;
+
 async function optScanContracts() {
   if (OPTC.busy) return;
   OPTC.busy = true; OPTC.cancel = false; OPTC.rows = [];
@@ -8196,7 +8219,7 @@ async function optScanContracts() {
   const rows = [];
   /* محاسبة الترشيح: تُعرض للمستخدم حتى يعرف *لماذا* قلّت العقود بدل أن
      يرى جدولاً قصيراً ويظن أن السوق بلا فرص. */
-  const st = { seen: 0, noPrice: 0, overBudget: 0, thinOI: 0, wideSpread: 0, worthless: 0, badRR: 0, kept: 0, syms: 0 };
+  const st = { seen: 0, noPrice: 0, overBudget: 0, thinOI: 0, wideSpread: 0, worthless: 0, badRR: 0, noVolume: 0, noBid: 0, ivBlowup: 0, beUnrealistic: 0, indecisive: 0, kept: 0, syms: 0 };
   OPTC.stats = st;
   for (let i = 0; i < list.length; i++) {
     if (OPTC.cancel) break;
@@ -8216,7 +8239,7 @@ async function optScanContracts() {
  *  st اختياري: مرِّره من المسح الشامل لتراكم الإحصاء المشترك، أو اتركه
  *  فيُنشأ عدّاد مستقل لاستدعاء منفرد. */
 async function optEvaluateSymbol(sym, stExternal) {
-  const st = stExternal || { seen: 0, noPrice: 0, overBudget: 0, thinOI: 0, wideSpread: 0, worthless: 0, badRR: 0, kept: 0, syms: 0 };
+  const st = stExternal || { seen: 0, noPrice: 0, overBudget: 0, thinOI: 0, wideSpread: 0, worthless: 0, badRR: 0, noVolume: 0, noBid: 0, ivBlowup: 0, beUnrealistic: 0, indecisive: 0, kept: 0, syms: 0 };
   const O = window.KSAEngine?.Options;
   if (!O) return [];
   try {
@@ -8231,6 +8254,19 @@ async function optEvaluateSymbol(sym, stExternal) {
       if (G.demo.has(sym)) return [];
 
       const fit = optChartFit(sym);
+
+      /* ── بوابة التدقيق ①: اتجاه حاسم — قبل تقييم أي عقد لهذا السهم ──
+         optDirection نفسه يقول صراحة في تعليقه: «إجماع ضعيف = لا اتجاه
+         واضح. الأوبشن الاتجاهي هنا مقامرة». هذا كان صحيحاً منذ البداية
+         لكن لم يُطبَّق كبوابة قط — الإجماع كان يُضاف للتقييم فقط (نقاط
+         إضافية أو خصم)، فيمكن لسهم بإجماع 55٪ أن يتصدّر الجدول بفضل
+         سيولة وسعر جيدين رغم أن اتجاهه غير محسوم أصلاً. الآن يُستبعد
+         السهم بالكامل من هذا المسح قبل إهدار طلبات على سلاسله. */
+      if (OPTC.strictAudit && fit.agreement != null && fit.agreement < OPTC.minAgreement) {
+        st.indecisive++;
+        return [];
+      }
+
       /* الاتجاه: من الشارت، أو مفروض من المستخدم */
       const wantCall = OPT.dirChoice === 'auto' ? (fit.dirUp !== false) : OPT.dirChoice === 'call';
 
@@ -8323,6 +8359,17 @@ async function optEvaluateSymbol(sym, stExternal) {
              ومعها «سُلَّم الميزانية» الذي يقول كم عقداً يفتحه كل مستوى. */
           if ((c.openInterest || 0) < OPTC.minOI) { st.thinOI++; continue; }
           if (c.spreadPct != null && c.spreadPct > OPTC.maxSpread) { st.wideSpread++; continue; }
+          /* ── بوابة التدقيق ②: سوق فعلي اليوم لا فائدة مفتوحة قديمة فقط ──
+             الفائدة المفتوحة تتراكم عبر جلسات وتبقى ظاهرة حتى لو لم يتداول
+             أحد العقد اليوم إطلاقاً — بالذات على الأسبوعي القريب من
+             الاستحقاق حيث تُفتح مراكز الأسبوع الماضي ولا تُقفل بعد. عقد
+             بفوليوم صفر لا سوق حيّاً فيه الآن مهما بدت فائدته المفتوحة
+             مطمئنة، وهذا فارق جوهري للمضاربة اليومية تحديداً. */
+          if (OPTC.strictAudit && (c.volume || 0) < OPTC.minVolume) { st.noVolume++; continue; }
+          /* ── بوابة التدقيق ③: سوق ثنائي الاتجاه حقيقي ──
+             bid=0 يعني عدم وجود مشترٍ بأي سعر معلن الآن — الخروج من
+             العقد وقت الحاجة يعتمد على أمل ظهور مشترٍ لا سعر فعلي. */
+          if (OPTC.strictAudit && OPTC.requireBid && !(c.bid > 0)) { st.noBid++; continue; }
 
           /* إعادة تسعير العقد عند هدف السهم ووقفه — لا نسبة من العلاوة.
              🛠️ زمن الحمل كان يلتهم عمر العقد كله فلا يبقى إلا جلسة واحدة،
@@ -8338,12 +8385,26 @@ async function optEvaluateSymbol(sym, stExternal) {
           const gain = tgtPx - c.mid, loss = c.mid - Math.max(0, stpPx);
           const rr = loss > 0.01 ? +(gain / loss).toFixed(2) : null;
           if (rr == null || rr <= 0) { st.badRR++; continue; }
-          st.kept++;
 
           const ivHv = (hv > 0) ? +(c.iv / hv).toFixed(2) : null;
           const em = O.expectedMove(spot, c.iv, O.yearsFromSessions(pk.sess));
           /* هل الحركة المطلوبة للتعادل داخل ما يسعّره السوق أصلاً؟ */
           const beVsEm = (em && em.pct > 0) ? +(c.breakevenMovePct / em.pct).toFixed(2) : null;
+
+          /* ── بوابة التدقيق ④: تذبذب ضمني منتفخ ──
+             عقد مسعَّر لتذبذب أكبر بكثير مما يفعله السهم فعلاً هو أخصب
+             أرض لانهيار التذبذب (IV crush): حتى لو تحرّك السهم في
+             الاتجاه الصحيح، انهيار IV بعد أي حدث يلتهم الربح. سابقاً
+             كان هذا خصم نقاط فقط (-12) فيبقى العقد ظاهراً وقد يتصدّر
+             الجدول بفضل عوامل أخرى قوية. الآن رفض كامل فوق 2.2×. */
+          if (OPTC.strictAudit && ivHv != null && ivHv > OPTC.maxIvHv) { st.ivBlowup++; continue; }
+          /* ── بوابة التدقيق ⑤: نقطة تعادل غير واقعية ──
+             حين تتجاوز الحركة اللازمة للتعادل ضِعف ما يسعّره السوق نفسه
+             حتى الاستحقاق، العقد أقرب لتذكرة يانصيب منه لصفقة مضاربة —
+             نفس المبدأ المُعلن في عمود «تعادل» بالجدول، مطبَّقاً الآن
+             كرفض لا مجرد خصم. */
+          if (OPTC.strictAudit && beVsEm != null && beVsEm > OPTC.maxBeVsEm) { st.beUnrealistic++; continue; }
+          st.kept++;
 
           /* ── التقييم ── */
           let sc = 0;
@@ -8408,15 +8469,22 @@ async function optEvaluateSymbol(sym, stExternal) {
  *  الرئيسية قصيرة ومقروءة بعد فصل جسم تقييم الرمز الواحد عنها. */
 function _optScanFinish(rows, list) {
   const prog = document.getElementById('optc-prog');
-  /* ── ترخية تلقائية ──
+  /* ── ترخية تلقائية — مرة واحدة لكل مسح صريح ──
      جدول فارغ بلا سبب هو أسوأ مخرَج ممكن: يفهمه المستخدم على أنه «لا
-     فرص»، والحقيقة غالباً أن عتبة داخلية ابتلعت كل شيء. إن خرج المجمّع
-     فارغاً تُرخى العتبات مرة واحدة تلقائياً ويُقال ذلك صراحةً. */
-  if (!rows.length && !OPTC.cancel && OPTC.minOI > 10) {
-    OPTC.relaxed = { oi: OPTC.minOI, sp: OPTC.maxSpread };
-    OPTC.minOI = 10; OPTC.maxSpread = 35;
-    const el1 = document.getElementById('optc-oi'); if (el1) el1.value = 10;
-    _radarProgOptc('لا عقد اجتاز العتبات — يُعاد المسح بعتبات مُرخاة تلقائياً…');
+     فرص»، والحقيقة غالباً أن عتبة داخلية (أو التدقيق الصارم الجديد)
+     ابتلعت كل شيء. إن خرج المجمّع فارغاً يُخفَّف التدقيق الصارم أولاً
+     (هو الأكثر قسوة على أسهم أقل سيولة) ثم تُرخى عتبات السيولة، معاً في
+     محاولة واحدة، ويُقال ذلك صراحةً — لا تخمين صامت. */
+  if (!rows.length && !OPTC.cancel && !OPTC._autoRelaxed) {
+    OPTC._autoRelaxed = true;
+    const hadAudit = OPTC.strictAudit;
+    OPTC.relaxed = { oi: OPTC.minOI, sp: OPTC.maxSpread, audit: hadAudit };
+    OPTC.strictAudit = false;
+    OPTC.minOI = Math.min(OPTC.minOI, 10); OPTC.maxSpread = Math.max(OPTC.maxSpread, 35);
+    const el1 = document.getElementById('optc-oi'); if (el1) el1.value = OPTC.minOI;
+    _radarProgOptc(hadAudit
+      ? '⚠️ لا عقد اجتاز التدقيق الصارم — يُعاد المسح بتدقيق مخفَّف وعتبات سيولة مُرخاة تلقائياً…'
+      : 'لا عقد اجتاز العتبات — يُعاد المسح بعتبات مُرخاة تلقائياً…');
     OPTC.busy = false;
     return optScanContracts();
   }
@@ -8450,6 +8518,22 @@ function optcToggleAligned(el) {
   el.style.color = OPTC.onlyAligned ? '#0ecf7e' : 'var(--t2)';
   optRenderContracts();
 }
+/** بوابات التدقيق الصارم تُطبَّق أثناء المسح نفسه (optEvaluateSymbol)
+ *  لا عند العرض — عقد رُفض هناك لا يبقى محفوظاً في OPTC.rows ليُعاد
+ *  إظهاره لاحقاً. لذا لا يكفي إعادة الرسم عند تبديل هذا الزر كما تفعل
+ *  «المتوافقة مع الشارت فقط» أو الترتيب؛ لا بد من مسح جديد فعلياً حتى
+ *  تعكس النتائج الإعداد الجديد بصدق، لا نتائج مسح سابق بإعداد مختلف. */
+function optcToggleStrictAudit(el) {
+  OPTC.strictAudit = !OPTC.strictAudit;
+  el.style.background = OPTC.strictAudit ? 'rgba(14,207,126,.14)' : 'transparent';
+  el.style.borderColor = OPTC.strictAudit ? 'rgba(14,207,126,.4)' : 'var(--bd2)';
+  el.style.color = OPTC.strictAudit ? '#0ecf7e' : 'var(--t2)';
+  if (OPTC.ran && !OPTC.busy) {
+    _radarProgOptc(OPTC.strictAudit ? 'يُعاد المسح بتدقيق صارم…' : 'يُعاد المسح بتدقيق مخفَّف…');
+    optScanContractsUser();
+  }
+}
+window.optcToggleStrictAudit = optcToggleStrictAudit;
 function optcSetHorizon(h, el) {
   OPTC.horizon = h;
   document.querySelectorAll('.optc-h').forEach(b => {
@@ -8620,21 +8704,30 @@ function optRenderContracts() {
       <div style="margin-top:6px;font-size:10.5px;color:var(--t3)">العقد الواحد = ١٠٠ سهم، فالكلفة المعروضة هي ما يُخصم من حسابك فعلاً.</div>
     </div>` : '';
 
+  const auditOn = OPTC.strictAudit;
   const stLine = st ? `<div style="margin-top:12px;font-size:11px;color:var(--t2);line-height:1.95;text-align:right;max-width:560px;margin-inline:auto;background:var(--c2);border:1px solid var(--bd);border-radius:8px;padding:10px 13px">
-      <b style="color:#FFD700">أين ذهبت العقود؟</b> فُحص <b>${st.seen}</b> عقداً${st.seen === 0 ? ' — <span style="color:#f04458">أي أن السلاسل لم تصل أصلاً، فالمشكلة في الجلب لا في الترشيح</span>' : ''}:
-      <div style="margin-top:5px">• <b>${st.thinOI}</b> بفائدة مفتوحة دون ${OPTC.minOI}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:2px">
+        <span><b style="color:#FFD700">أين ذهبت العقود؟</b> فُحص <b>${st.seen}</b> عقداً${st.seen === 0 ? ' — <span style="color:#f04458">أي أن السلاسل لم تصل أصلاً، فالمشكلة في الجلب لا في الترشيح</span>' : ''}:</span>
+        <span style="font-size:10px;font-weight:700;color:${auditOn ? '#0ecf7e' : '#f5c842'}">${auditOn ? '🛡️ التدقيق الصارم مفعَّل' : '⚠️ التدقيق الصارم مُخفَّف'}</span>
+      </div>
+      <div style="margin-top:5px">• <b>${st.indecisive}</b> رمز استُبعد كاملاً — اتجاه غير حاسم (إجماع دون ${OPTC.minAgreement}٪)</div>
+      <div>• <b>${st.thinOI}</b> بفائدة مفتوحة دون ${OPTC.minOI}</div>
       <div>• <b>${st.wideSpread}</b> بفارق عرض/طلب فوق ${OPTC.maxSpread}٪</div>
+      <div>• <b>${st.noVolume}</b> بفوليوم صفري اليوم — لا سوق فعلي رغم فائدته المفتوحة</div>
+      <div>• <b>${st.noBid}</b> بلا عرض شراء حقيقي (bid=0) — لا خروج فوري بسعر حقيقي</div>
       <div>• <b>${st.worthless}</b> ينتهي بلا قيمة عند هدف السهم (بعيد عن النقد)</div>
       <div>• <b>${st.badRR}</b> بعائد غير موجب عند هدف السهم</div>
+      <div>• <b>${st.ivBlowup}</b> بتذبذب ضمني منتفخ فوق ${OPTC.maxIvHv}× المُحقَّق — مخاطرة انهيار تذبذب</div>
+      <div>• <b>${st.beUnrealistic}</b> بتعادل يفوق ${OPTC.maxBeVsEm}× الحركة التي يسعّرها السوق</div>
       <div>• <b>${st.noPrice}</b> بلا تسعير صالح</div>
-      <div style="margin-top:5px;color:#0ecf7e">• <b>${st.kept}</b> اجتاز كل الشروط</div>
+      <div style="margin-top:5px;color:#0ecf7e">• <b>${st.kept}</b> اجتاز كل الشروط${auditOn ? ' (بالتدقيق الصارم)' : ''}</div>
     </div>` : '';
 
   if (!rows.length) {
     panel.innerHTML = `<div style="padding:24px;text-align:center;color:var(--t3);font-size:12px;line-height:2">
       ${OPTC.busy ? 'جارٍ تقييم السلاسل…' : OPTC.ran
         ? `لا عقد ضمن ميزانية <b style="color:#FFD700">${OPTC.budget}$</b> بسيولة ≥ ${OPTC.minOI} عقد مفتوح.<br>
-           <span style="font-size:11px">ارفع الميزانية أو اخفض حدّ السيولة${OPTC.onlyAligned ? '، أو ألغِ «المتوافقة مع الشارت فقط»' : ''}.</span>`
+           <span style="font-size:11px">ارفع الميزانية أو اخفض حدّ السيولة${OPTC.onlyAligned ? '، أو ألغِ «المتوافقة مع الشارت فقط»' : ''}${OPTC.strictAudit ? '، أو خفّف «🛡️ تدقيق صارم»' : ''}.</span>`
         : 'اضغط <b style="color:#FFD700">«🎟️ امسح كل العقود»</b> أعلاه.'}
       ${ladderLine}
       ${stLine}
@@ -8659,7 +8752,7 @@ function optRenderContracts() {
   panel.innerHTML = `
     <div style="background:rgba(255,215,0,.05);border:1px solid rgba(255,215,0,.22);border-radius:9px;padding:10px 13px;margin-bottom:11px;font-size:11px;line-height:1.9;color:var(--t2)">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:5px">
-        <span><b style="color:#FFD700">${rows.length} عقد</b> — عقد واحد لكل سهم، الأقوى فقط، من ${pool.length} عقداً اجتاز السيولة والعائد ضمن ميزانية <b style="color:#FFD700">${OPTC.budget}$</b>.</span>
+        <span><b style="color:#FFD700">${rows.length} عقد</b> — عقد واحد لكل سهم، الأقوى فقط، من ${pool.length} عقداً اجتاز السيولة والعائد ضمن ميزانية <b style="color:#FFD700">${OPTC.budget}$</b>${auditOn ? ' <span style="color:#0ecf7e" title="فوليوم اليوم حقيقي، عرض شراء حقيقي، تذبذب ضمني معقول، تعادل واقعي، وسهمه بإجماع اتجاهي حاسم">🛡️ وتدقيقاً صارماً</span>' : ''}.</span>
         <span style="font-size:10.5px;font-weight:700">${freshLine}</span>
       </div>
       اضغط أي صف ليفتح <b>شارت السهم</b> في اللوحة المجاورة و<b>بطاقة التفصيل</b> أسفل الجدول.
@@ -8828,51 +8921,122 @@ async function shareBestContracts(sym) {
   } catch (e) { return { daily: null, weekly: null }; }
 }
 
-/** أهداف السهم من عدة مدارس تحليل مستقلة — لا مدرسة واحدة تحتكر «الهدف».
- *  كل مدرسة تُحسب من نفس بيانات الشارت لكن بمنهج مختلف تماماً عن غيرها:
- *   📐 البنيوي     — أقرب قمة متأرجحة حقيقية (buildEntryPlan/swingLevels)
- *   🦋 الفراكتالي  — فراكتال بيل ويليامز غير المكسور (KSAEngine.fractalTargets)
- *   📊 الإحصائي    — نطاق القيمة (حجم تداول + قناة انحدار) (KSAEngine.valueBand)
- *   📈 التنبؤي     — ARIMA(1,1,0) بفاصل ثقة 95٪ (KSAEngine.forecastARIMA)
- *  أي مدرسة تعجز عن إنتاج هدف فوق السعر تُستبعد بصراحة، لا تُملأ بتخمين —
- *  نفس مبدأ المنصة كلها: لا رقم بلا مصدر محسوب. */
-function computeSchoolTargets(sym, ep) {
+/** أهداف السهم من عدة مدارس تحليل مستقلة — لا مدرسة واحدة تحتكر «الهدف»،
+ *  والأهم: كل هدف في اتجاه الترند المكتشف فعلياً، لا افتراضاً صعودياً
+ *  دائماً. سهم هابط يُعطى أهدافاً تحت سعره الحالي، وصاعد أهدافاً فوقه —
+ *  لا العكس أبداً. الاتجاه من optDirection: إجماع أدلة مستقلة (السعر
+ *  مقابل المتوسطات، ماكد، القوة النسبية، ميل الانحدار الخطي).
+ *
+ *  تسع مدارس، كل واحدة من دالة قائمة أصلاً في المحرّك:
+ *   📐 البنيوي        — KSAEngine.executionPlan (أقرب مستوى بنيوي مقابل)
+ *   💧 مناطق السيولة   — المستوى البنيوي الثاني (تجمّع أوامر أعمق)
+ *   🦋 الفراكتالي      — KSAEngine.fractalTargets (قمة/قاع فراكتالي حيّ)
+ *   📐 القناة السعرية  — detectTrendChannel (اختراق حافة القناة المقابلة)
+ *   🌊 إليوت           — detectElliott (هدف الموجة التالية)
+ *   🦋 الهارمونيك       — detectHarmonic (هدف الموجة الكاملة عند نقطة A)
+ *   📊 ملف الحجم       — KSAEngine.volumeProfile (حافة نطاق القيمة)
+ *   📈 التنبؤي (ARIMA) — KSAEngine.forecastARIMA (حد فاصل ثقة 95٪)
+ *   🐺 موجة الذئب       — detectWolfe (خط 1-4 الممتد EPA)
+ *  كل مدرسة تحمل وقفها الخاص إن كان لها مرجع طبيعي، وإلا يظهر «—» صراحة
+ *  بدل وقف مُلفَّق. أي مدرسة تعجز عن إنتاج هدف باتجاه الترند المكتشف —
+ *  أو يخالف اتجاهها المستقل (إليوت/الهارمونيك/الذئب) ذلك الترند — تُستبعد
+ *  وتُدرَج ضمن «امتنعت»، لا تُقحَم بعكس الاتجاه. */
+function computeSchoolTargets(sym) {
   const cs = G.cans[sym];
-  if (!cs || cs.length < 30) return [];
+  if (!cs || cs.length < 40) return { dirUp: null, hits: [], abstained: [], total: 0 };
   const price = G.pr[sym] || cs[cs.length - 1].close;
-  if (!(price > 0)) return [];
-  const out = [];
+  if (!(price > 0)) return { dirUp: null, hits: [], abstained: [], total: 0 };
 
-  if (ep && ep.targets && ep.targets[0] && ep.targets[0].price > price) {
-    out.push({ icon: '📐', school: 'البنيوي', target: ep.targets[0].price, note: ep.targets[0].src });
-  }
+  const dir = (() => { try { return optDirection(sym); } catch (e) { return null; } })();
+  const dirUp = dir ? dir.dirUp : true;
+  const okTarget = (t) => isNum(t) && (dirUp ? t > price : t < price);
+  /* الوقف يجب أن يقع على الجهة المعاكسة للهدف من السعر (إبطال الفرضية)،
+     وإلا فهو ليس وقفاً حقيقياً — حالة حدّية ظهرت فعلياً في اختبار: نطاق
+     ثقة ARIMA بأكمله على جهة واحدة من السعر يجعل حدّه الآخر يقع في نفس
+     جهة الهدف، فيصبح رقماً مضلِّلاً لا نقطة إبطال. يُعرض «—» بدل ذلك. */
+  const okStop = (s) => isNum(s) && (dirUp ? s < price : s > price);
+
+  const hits = [], abstained = [];
+  const add = (icon, school, target, stop, note) => {
+    if (okTarget(target)) hits.push({ icon, school, target: +target.toFixed(2), stop: okStop(stop) ? +stop.toFixed(2) : null, note });
+    else abstained.push(school);
+  };
+
+  let plan = null;
+  try { plan = KSAEngine.executionPlan(cs, { dirUp }); } catch (e) { }
+  if (plan && plan.ok) {
+    add('📐', 'البنيوي', plan.target1, plan.stop, plan.targetSource);
+    const lvl = dirUp ? plan.resistances[1] : plan.supports[1];
+    if (lvl != null) add('💧', 'مناطق السيولة', lvl, null, 'المستوى البنيوي التالي — تجمّع أوامر أعمق');
+    else abstained.push('مناطق السيولة');
+  } else { abstained.push('البنيوي', 'مناطق السيولة'); }
+
   try {
     const fr = ddFrac(sym);
-    if (fr && fr.ok && fr.target > price) {
-      out.push({ icon: '🦋', school: 'الفراكتالي', target: fr.target, note: fr.targetSource || 'فراكتال بيل ويليامز' });
-    }
-  } catch (e) { }
-  try {
-    const vb = calculateValueBand(cs);
-    if (vb && vb.ok) {
-      const candidates = [vb.bandHigh, vb.regressionHigh, vb.valueArea ? vb.valueArea.high : null].filter(v => isNum(v) && v > price);
-      if (candidates.length) out.push({ icon: '📊', school: 'الإحصائي (حجم + انحدار)', target: +Math.max(...candidates).toFixed(2), note: 'أعلى مراسي نطاق القيمة المرجعي' });
-    }
-  } catch (e) { }
-  try {
-    const closes = cs.map(c => c.close);
-    const fc = predictPriceARIMA(closes, 5);
-    if (fc && fc.ok) {
-      const t = fc.meaningful && isNum(fc.hi) ? fc.hi : fc.forecast;
-      if (isNum(t) && t > price) {
-        out.push({ icon: '📈', school: 'التنبؤي (ARIMA)', target: +t.toFixed(2),
-          note: fc.meaningful ? 'الحد الأعلى لفاصل ثقة 95٪ خلال 5 جلسات' : 'تنبؤ غير مميَّز إحصائياً عن ثبات السعر — إرشادي فقط' });
-      }
-    }
-  } catch (e) { }
+    if (fr && fr.ok) add('🦋', 'الفراكتالي', dirUp ? fr.target : fr.support, dirUp ? fr.support : fr.target,
+      dirUp ? (fr.targetSource || 'قمة فراكتالية حيّة') : 'أقرب قاع فراكتالي غير مكسور');
+    else abstained.push('الفراكتالي');
+  } catch (e) { abstained.push('الفراكتالي'); }
 
-  return out.map(t => ({ ...t, distPct: +(((t.target - price) / price) * 100).toFixed(2) }))
-    .sort((a, b) => a.target - b.target);
+  try {
+    const tc = detectTrendChannel(cs);
+    if (tc && tc.valid) add('📐', 'القناة السعرية', dirUp ? tc.breakoutUpTarget : tc.breakoutDownTarget,
+      dirUp ? tc.supAtLast : tc.resAtLast, `قناة ${tc.shape}`);
+    else abstained.push('القناة السعرية');
+  } catch (e) { abstained.push('القناة السعرية'); }
+
+  try {
+    const el = detectElliott(cs);
+    if (el && el.target && el.bullBias === dirUp) add('🌊', 'إليوت', el.target.price, null, el.target.label);
+    else abstained.push('إليوت');
+  } catch (e) { abstained.push('إليوت'); }
+
+  try {
+    const h = detectHarmonic(cs);
+    const hBull = h && h.sig === 'شراء';
+    if (h && h.targets && hBull === dirUp) add('🦋', 'الهارمونيك', h.targets.t3, h.targets.sl, `نموذج ${h.name}`);
+    else abstained.push('الهارمونيك');
+  } catch (e) { abstained.push('الهارمونيك'); }
+
+  try {
+    const vp = KSAEngine.volumeProfile(cs, { bins: 60, capOutliers: true });
+    if (vp) add('📊', 'ملف الحجم', dirUp ? vp.valueAreaHigh : vp.valueAreaLow, dirUp ? vp.valueAreaLow : vp.valueAreaHigh, `نقطة التحكّم (POC) ${vp.poc}`);
+    else abstained.push('ملف الحجم');
+  } catch (e) { abstained.push('ملف الحجم'); }
+
+  try {
+    const fc = predictPriceARIMA(cs.map(c => c.close), 5);
+    if (fc && fc.ok) {
+      const t = fc.meaningful ? (dirUp ? fc.hi : fc.lo) : fc.forecast;
+      add('📈', 'التنبؤي (ARIMA)', t, fc.meaningful ? (dirUp ? fc.lo : fc.hi) : null,
+        fc.meaningful ? 'حد فاصل ثقة 95٪ خلال 5 جلسات' : 'تنبؤ غير مميَّز إحصائياً — إرشادي فقط');
+    } else abstained.push('التنبؤي (ARIMA)');
+  } catch (e) { abstained.push('التنبؤي (ARIMA)'); }
+
+  try {
+    const w = detectWolfe(cs);
+    if (w && w.valid && w.bullish === dirUp) add('🐺', 'موجة الذئب', w.target.price, null, w.target.label);
+    else abstained.push('موجة الذئب');
+  } catch (e) { abstained.push('موجة الذئب'); }
+
+  hits.sort((a, b) => dirUp ? a.target - b.target : b.target - a.target);   /* الأقرب من السعر أولاً */
+
+  /* إجماع: أكبر مجموعة أهداف متقاربة (ضمن 1.2٪ من بعضها) من مدرستين
+     فأكثر — لا رقم دلالة إحصائية، فقط وصف تقاطع مواقع محسوبة فعلياً. */
+  let consensus = null;
+  for (let i = 0; i < hits.length; i++) {
+    const cluster = hits.filter(h => Math.abs(h.target - hits[i].target) / hits[i].target <= 0.012);
+    if (cluster.length >= 2 && (!consensus || cluster.length > consensus.schools.length)) {
+      const lo = Math.min(...cluster.map(c => c.target)), hi = Math.max(...cluster.map(c => c.target));
+      consensus = { schools: cluster.map(c => c.school), lo: +lo.toFixed(2), hi: +hi.toFixed(2) };
+    }
+  }
+
+  return {
+    dirUp, agreement: dir ? dir.agreement : null, price,
+    hits: hits.map(h => ({ ...h, distPct: +(((h.target - price) / price) * 100).toFixed(2) })),
+    abstained, consensus, total: hits.length + abstained.length
+  };
 }
 
 function isNum(v) { return typeof v === 'number' && isFinite(v); }
@@ -8882,7 +9046,7 @@ function shareCardData(sym, radarRow, contracts) {
   const name = NAMES[sym] || sym;
   const ep = buildEntryPlan(sym, { minRR: 1.6 });
   const ta = (() => { try { return timeActivation(sym); } catch (e) { return null; } })();
-  const schools = (() => { try { return computeSchoolTargets(sym, ep); } catch (e) { return []; } })();
+  const schoolData = (() => { try { return computeSchoolTargets(sym); } catch (e) { return { dirUp: null, hits: [], abstained: [], total: 0 }; } })();
 
   let action = { label: '👁 مراقبة', color: SC.t2, bg: 'rgba(154,164,184,.14)' };
   if (ep) {
@@ -8908,10 +9072,14 @@ function shareCardData(sym, radarRow, contracts) {
       if (e && e.wave) badges.push({ icon: '🌊', text: e.why, color: e.sig === 'شراء' ? SC.up : e.sig === 'بيع' ? SC.dn : SC.t2 });
       const w = detectWolfe(cs);
       if (w) badges.push({ icon: '🐺', text: `موجة ذئب ${w.bullish ? 'صعودية' : 'هبوطية'}`, color: w.bullish ? SC.up : SC.dn });
+      /* شارة الفراكتال — من نفس مدرسة الفراكتال في جدول الأهداف، تُعرض
+         هنا أيضاً كشارة سريعة إن أنتجت هدفاً باتجاه الترند المكتشف. */
+      const frHit = schoolData.hits.find(x => x.school === 'الفراكتالي');
+      if (frHit) badges.push({ icon: '🎯', text: `${frHit.note} ${frHit.target}$`, color: schoolData.dirUp ? SC.up : SC.dn });
     }
   } catch (e) { }
 
-  return { sym, name, price, pct, ep, ta, action, badges, schools,
+  return { sym, name, price, pct, ep, ta, action, badges, schoolData,
     contracts: contracts || { daily: null, weekly: null },
     radarRow: radarRow || null, generatedAt: new Date() };
 }
@@ -9020,6 +9188,93 @@ function _scDrawContractBox(ctx, x, y, w, h, title, c) {
   ctx.fillText(`فائدة مفتوحة ${(c.oi || 0).toLocaleString('en')} · ع/م ${c.rr}R · داخل النقد ${c.probITM ?? '—'}٪`, x + w - pad, y + h - 12);
 }
 
+/** ارتفاع صندوق «أهداف السهم — كل المدارس» — مجموع دقيق لنفس الأقسام
+ *  التي يرسمها _scDrawSchoolsBox أدناه بنفس شروط ظهورها، حتى لا يبقى
+ *  فراغ زائد أو تراكب حين يقلّ عدد المدارس أو يغيب الإجماع. */
+function _scSchoolsBoxHeight(sd) {
+  if (!sd || sd.total === 0) return 0;
+  const TITLE_H = 54, HEADER_H = 26, ROW_H = 32, CONS_H = 30, ABST_H = 54, NO_HITS_H = 42, BOTTOM_PAD = 16;
+  return TITLE_H + (sd.hits.length ? HEADER_H + sd.hits.length * ROW_H : NO_HITS_H)
+    + (sd.consensus ? CONS_H : 0) + (sd.abstained.length ? ABST_H : 0) + BOTTOM_PAD;
+}
+
+/** يرسم صندوق «أهداف السهم — كل المدارس»: جدول حقيقي بأربعة أعمدة
+ *  (المدرسة، الهدف، الوقف، الأساس)، مع سطر إجماع عند تقاطع هدفين فأكثر
+ *  ضمن نطاق ضيق، وسطر يسرد المدارس التي امتنعت صراحة عن إعطاء هدف
+ *  باتجاه الترند المكتشف — بدل إخفائها أو إقحام رقم يخالف الاتجاه. */
+function _scDrawSchoolsBox(ctx, x, y, w, h, sd) {
+  const pad = 20;
+  ctx.fillStyle = SC.bg2; _scRounded(ctx, x, y, w, h, 10); ctx.fill();
+  ctx.strokeStyle = SC.cy + '55'; ctx.lineWidth = 1.5; _scRounded(ctx, x, y, w, h, 10); ctx.stroke();
+
+  /* ── العنوان + اتجاه الترند المكتشف صراحة (لا افتراض صعودي دائم) ── */
+  ctx.textAlign = 'right'; ctx.fillStyle = SC.cy; ctx.font = '700 16px Tahoma';
+  ctx.fillText('🎯 أهداف السهم — كل المدارس', x + w - pad, y + 26);
+  const dirLbl = sd.dirUp ? `📈 اتجاه صاعد${sd.agreement != null ? ` — إجماع ${sd.agreement}٪` : ''}`
+                          : `📉 اتجاه هابط${sd.agreement != null ? ` — إجماع ${sd.agreement}٪` : ''}`;
+  ctx.textAlign = 'left'; ctx.fillStyle = sd.dirUp ? SC.up : SC.dn; ctx.font = '700 12px Tahoma';
+  ctx.fillText(dirLbl, x + pad, y + 20);
+  ctx.fillStyle = SC.t3; ctx.font = '11px Tahoma';
+  ctx.fillText(`${sd.hits.length} من ${sd.total} مدرسة أعطت هدفاً بهذا الاتجاه`, x + pad, y + 38);
+
+  let ry = y + 54;
+
+  if (!sd.hits.length) {
+    ctx.textAlign = 'right'; ctx.fillStyle = SC.t2; ctx.font = '12.5px Tahoma';
+    _scWrapRTL(ctx, 'لا مدرسة أنتجت هدفاً باتجاه الترند المكتشف حالياً — كلها امتنعت صراحة، أدناه.', x + w - pad, ry + 18, w - pad * 2, 20, 2);
+    ry += 42;
+  } else {
+    /* ── أعمدة الجدول: مدرسة (يمين) ← هدف ← وقف ← أساس (يسار) ── */
+    const innerW = w - pad * 2;
+    const colNoteW = innerW * 0.36, colStopW = innerW * 0.16, colTargetW = innerW * 0.24;
+    const colSchoolW = innerW - colNoteW - colStopW - colTargetW;
+    const xNoteL = x + pad, xNoteR = xNoteL + colNoteW;
+    const xStopR = xNoteR + colStopW;
+    const xTargetR = xStopR + colTargetW;
+    const xSchoolR = xTargetR + colSchoolW;
+
+    ctx.fillStyle = SC.bg3; ctx.fillRect(x + 1, ry, w - 2, 26);
+    ctx.font = '700 11px Tahoma'; ctx.fillStyle = SC.t3; ctx.textAlign = 'right';
+    ctx.fillText('المدرسة', xSchoolR, ry + 18);
+    ctx.fillText('الهدف', xTargetR, ry + 18);
+    ctx.fillText('الوقف', xStopR, ry + 18);
+    ctx.fillText('الأساس', xNoteR, ry + 18);
+    ry += 26;
+
+    const rowH = 32;
+    sd.hits.forEach((s, i) => {
+      if (i % 2 === 1) { ctx.fillStyle = 'rgba(255,255,255,.025)'; ctx.fillRect(x + 1, ry, w - 2, rowH); }
+      const cy2 = ry + 21;
+      ctx.textAlign = 'right';
+      ctx.fillStyle = SC.t1; ctx.font = '12px Tahoma';
+      ctx.fillText(_scTruncate(ctx, `${s.icon} ${s.school}`, colSchoolW - 8), xSchoolR, cy2);
+      ctx.fillStyle = sd.dirUp ? SC.up : SC.dn; ctx.font = '700 12.5px "IBM Plex Mono", monospace';
+      ctx.fillText(_scTruncate(ctx, `${s.target}$ (${s.distPct > 0 ? '+' : ''}${s.distPct}٪)`, colTargetW - 8), xTargetR, cy2);
+      ctx.fillStyle = s.stop != null ? SC.dn : SC.t3; ctx.font = '12px "IBM Plex Mono", monospace';
+      ctx.fillText(s.stop != null ? `${s.stop}$` : '—', xStopR, cy2);
+      ctx.fillStyle = SC.t2; ctx.font = '10.5px Tahoma';
+      ctx.fillText(_scTruncate(ctx, s.note || '—', colNoteW - 8), xNoteR, cy2);
+      ry += rowH;
+    });
+  }
+
+  /* ── إجماع: أكبر مجموعة أهداف متقاربة من مدرستين فأكثر ── */
+  if (sd.consensus) {
+    ctx.fillStyle = 'rgba(14,207,126,.10)'; ctx.fillRect(x + 1, ry, w - 2, 30);
+    ctx.textAlign = 'right'; ctx.fillStyle = SC.up; ctx.font = '700 12.5px Tahoma';
+    ctx.fillText(`🎯 إجماع ${sd.consensus.schools.length} مدارس على ${sd.consensus.lo}–${sd.consensus.hi}$`, x + w - pad, ry + 20);
+    ctx.textAlign = 'left'; ctx.fillStyle = SC.t2; ctx.font = '10.5px Tahoma';
+    ctx.fillText(_scTruncate(ctx, sd.consensus.schools.join(' · '), w - pad * 2 - 280), x + pad, ry + 20);
+    ry += 30;
+  }
+
+  /* ── المدارس التي امتنعت — صراحة، لا إخفاء ── */
+  if (sd.abstained.length) {
+    ctx.textAlign = 'right'; ctx.fillStyle = SC.t3; ctx.font = '10.5px Tahoma';
+    _scWrapRTL(ctx, `◇ امتنعت ${sd.abstained.length}: ${sd.abstained.join(' · ')}`, x + w - pad, ry + 16, w - pad * 2, 16, 3);
+  }
+}
+
 /** يرسم البطاقة كاملة على Canvas ويعيده مع النصوص الجاهزة للنشر. */
 function drawShareCard(sym, radarRow, contracts) {
   const d = shareCardData(sym, radarRow, contracts);
@@ -9031,9 +9286,8 @@ function drawShareCard(sym, radarRow, contracts) {
   const nBoxes = twoTargets ? 5 : 4;
   const hasBadges = d.badges && d.badges.length;
   const OPT_BOX_H = 208; /* ارتفاع صندوقَي أفضل عقد يومي وأفضل عقد أسبوعي، جنباً إلى جنب */
-  const SCHOOLS_ROW_H = 32;
-  const hasSchools = d.schools && d.schools.length;
-  const SCHOOLS_BOX_H = hasSchools ? (56 + d.schools.length * SCHOOLS_ROW_H) : 0;
+  const hasSchools = d.schoolData && d.schoolData.total > 0;
+  const SCHOOLS_BOX_H = _scSchoolsBoxHeight(d.schoolData);
 
   /* ── الارتفاع الفعلي، لا تقدير تقريبي ──
      كان تقديراً ثابتاً يفترض وجود كل الأقسام الاختيارية معاً، فينتج
@@ -9041,7 +9295,7 @@ function drawShareCard(sym, radarRow, contracts) {
      مقاس، لا شارات أنماط). الارتفاع الآن مجموع دقيق لنفس الأقسام
      بنفس شروط ظهورها أدناه — لا فراغ زائد ولا تراكب. */
   const PAD = 44;
-  let hAcc = 56 + 26 + 56 + 64 + 66;
+  let hAcc = 56 + 26 + 56 + 34 + 44;
   hAcc += hasBadges ? (34 + 22) : 10;
   hAcc += 150 + 32;
   if (ep && ep.targets[0]) hAcc += 30;
@@ -9057,10 +9311,17 @@ function drawShareCard(sym, radarRow, contracts) {
   canvas.height = totalH;
   const ctx = canvas.getContext('2d');
 
-  /* خلفية متدرّجة */
+  /* ── بطاقة بزوايا مدوّرة حقيقية: تُقصّ الخلفية على مسار مدوّر، ثم يُرسم
+     إطار رفيع حول نفس المسار — لا مستطيل حاد كما كان. ── */
+  ctx.save();
+  _scRounded(ctx, 0, 0, SC.W, totalH, 22);
+  ctx.clip();
   const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
   grad.addColorStop(0, SC.bg1); grad.addColorStop(1, SC.bg0);
   ctx.fillStyle = grad; ctx.fillRect(0, 0, SC.W, canvas.height);
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(245,200,66,.28)'; ctx.lineWidth = 1.5;
+  _scRounded(ctx, 1, 1, SC.W - 2, totalH - 2, 21); ctx.stroke();
 
   ctx.textBaseline = 'alphabetic';
   let y = 56;
@@ -9076,28 +9337,30 @@ function drawShareCard(sym, radarRow, contracts) {
   ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(SC.W - PAD, y); ctx.stroke();
   y += 56;
 
-  /* ── الرمز والسعر ── */
+  /* ── الرمز، مع شارة الإجراء إلى جانبه لا في سطر منفصل ── */
   ctx.textAlign = 'right';
-  ctx.fillStyle = SC.t1; ctx.font = '700 56px "IBM Plex Mono", monospace';
+  ctx.fillStyle = SC.t1; ctx.font = '700 52px "IBM Plex Mono", monospace';
   ctx.fillText(d.sym, SC.W - PAD, y);
-  ctx.font = '20px Tahoma'; ctx.fillStyle = SC.t2;
-  ctx.fillText(d.name, SC.W - PAD, y + 30);
 
-  ctx.textAlign = 'left';
-  ctx.fillStyle = SC.t1; ctx.font = '700 40px "IBM Plex Mono", monospace';
-  ctx.fillText(`${d.price.toFixed(2)}$`, PAD, y);
-  ctx.fillStyle = d.pct >= 0 ? SC.up : SC.dn; ctx.font = '700 20px "IBM Plex Mono", monospace';
-  ctx.fillText(`${d.pct >= 0 ? '▲+' : '▼'}${d.pct.toFixed(2)}%`, PAD, y + 30);
-  y += 64;
-
-  /* ── شارة الإجراء ── */
-  ctx.font = '700 22px Tahoma';
+  ctx.font = '700 14px Tahoma';
   const albl = d.action.label;
-  const atw = ctx.measureText(albl).width + 56;
-  ctx.fillStyle = d.action.bg; _scRounded(ctx, (SC.W - atw) / 2, y, atw, 46, 23); ctx.fill();
-  ctx.fillStyle = d.action.color; ctx.textAlign = 'center';
-  ctx.fillText(albl, SC.W / 2, y + 31);
-  y += 66;
+  const atw = ctx.measureText(albl).width + 34;
+  const aby = y - 34;
+  ctx.fillStyle = d.action.bg; _scRounded(ctx, PAD, aby, atw, 34, 17); ctx.fill();
+  ctx.strokeStyle = d.action.color + '55'; ctx.lineWidth = 1; _scRounded(ctx, PAD, aby, atw, 34, 17); ctx.stroke();
+  ctx.fillStyle = d.action.color; ctx.textAlign = 'left'; ctx.font = '700 14px Tahoma';
+  ctx.fillText(albl, PAD + 17, aby + 23);
+
+  /* ── الاسم والسعر تحت الرمز والشارة ── */
+  y += 34;
+  ctx.textAlign = 'right'; ctx.font = '19px Tahoma'; ctx.fillStyle = SC.t2;
+  ctx.fillText(d.name, SC.W - PAD, y);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = SC.t1; ctx.font = '700 30px "IBM Plex Mono", monospace';
+  ctx.fillText(`${d.price.toFixed(2)}$`, PAD, y);
+  ctx.fillStyle = d.pct >= 0 ? SC.up : SC.dn; ctx.font = '700 15px "IBM Plex Mono", monospace';
+  ctx.fillText(`${d.pct >= 0 ? '▲+' : '▼'}${d.pct.toFixed(2)}%`, PAD, y + 18);
+  y += 44;
 
   /* ── شارات الأنماط المكتشفة (هارمونيك/إيليوت/الذئب) — تُعرض فقط حين
      توجد إشارة فعلية، لا تُختلَق ── */
@@ -9170,24 +9433,12 @@ function drawShareCard(sym, radarRow, contracts) {
     y += OPT_BOX_H + 26;
   }
 
-  /* ── أهداف السهم بجميع المدارس — كل مدرسة تحليل بحسابها المستقل، لا
-     مدرسة واحدة تحتكر «الهدف»: البنيوي، الفراكتالي، الإحصائي (حجم
-     وانحدار)، والتنبؤي (ARIMA). يُحذف الصندوق كاملاً إن لم تُنتج أي
-     مدرسة هدفاً — لا صف فارغ ولا تخمين. */
+  /* ── أهداف السهم بجميع المدارس — جدول حقيقي (مدرسة/هدف/وقف/أساس)،
+     كل مدرسة باتجاه الترند المكتشف فعلياً لا افتراضاً صعودياً دائماً،
+     مع سطر إجماع وسطر يسرد المدارس التي امتنعت صراحة. يُحذف الصندوق
+     كاملاً إن لم تتوفر بيانات كافية لحساب أي مدرسة أصلاً. */
   if (hasSchools) {
-    ctx.fillStyle = SC.bg2; _scRounded(ctx, PAD, y, SC.W - PAD * 2, SCHOOLS_BOX_H, 10); ctx.fill();
-    ctx.strokeStyle = SC.cy + '55'; ctx.lineWidth = 1.5; _scRounded(ctx, PAD, y, SC.W - PAD * 2, SCHOOLS_BOX_H, 10); ctx.stroke();
-    ctx.textAlign = 'right'; ctx.fillStyle = SC.cy; ctx.font = '700 16px Tahoma';
-    ctx.fillText('🎯 أهداف السهم — كل المدارس', SC.W - PAD - 20, y + 28);
-    d.schools.forEach((s, i) => {
-      const ry = y + 44 + i * SCHOOLS_ROW_H + 18;
-      ctx.textAlign = 'right'; ctx.fillStyle = SC.t1; ctx.font = '13px Tahoma';
-      ctx.fillText(`${s.icon} ${s.school}`, SC.W - PAD - 20, ry);
-      ctx.textAlign = 'left'; ctx.fillStyle = SC.up; ctx.font = '700 15px "IBM Plex Mono", monospace';
-      ctx.fillText(`${s.target}$`, PAD + 20 + 90, ry);
-      ctx.fillStyle = SC.t3; ctx.font = '11.5px Tahoma';
-      ctx.fillText(`+${s.distPct}٪`, PAD + 20, ry);
-    });
+    _scDrawSchoolsBox(ctx, PAD, y, SC.W - PAD * 2, SCHOOLS_BOX_H, d.schoolData);
     y += SCHOOLS_BOX_H + 26;
   }
 
@@ -9235,6 +9486,16 @@ function drawShareCard(sym, radarRow, contracts) {
   return { canvas, data: d, tweetText, tgText };
 }
 
+/** يقصّ نصاً بنقاط حذف (…) إن تجاوز عرضاً أقصى — لخلايا الجدول ذات
+ *  العرض الثابت التي لا تتحمّل التفاف سطر كامل. */
+function _scTruncate(ctx, text, maxW) {
+  text = String(text ?? '—');
+  if (ctx.measureText(text).width <= maxW) return text;
+  let t = text;
+  while (t.length > 1 && ctx.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+  return t + '…';
+}
+
 function _scWrapRTL(ctx, text, xRight, y, maxW, lh, maxLines) {
   const words = String(text).split(' ');
   let line = '', lines = [];
@@ -9269,8 +9530,9 @@ function _scContractLine(icon, label, c) {
 function _scTweetText(d) {
   const ep = d.ep, cd = d.contracts.daily, cw = d.contracts.weekly;
   const optLines = [``, _scContractLine('⚡', 'عقد يومي', cd), _scContractLine('📅', 'عقد أسبوعي', cw)];
-  const schoolLines = (d.schools && d.schools.length)
-    ? [``, `🎯 أهداف كل المدارس: ${d.schools.map(s => `${s.icon} ${s.school} ${s.target}$`).join(' · ')}`]
+  const sd = d.schoolData;
+  const schoolLines = (sd && sd.hits.length)
+    ? [``, `🎯 أهداف كل المدارس (${sd.dirUp ? 'صاعد' : 'هابط'}): ${sd.hits.map(s => `${s.icon} ${s.school} ${s.target}$`).join(' · ')}`]
     : [];
   if (!ep) return [`${d.sym} ${d.name} — ${d.price.toFixed(2)}$ (${d.pct >= 0 ? '+' : ''}${d.pct.toFixed(2)}٪)`, ...optLines, ...schoolLines, ``, `⚠️ للمناقشة فقط، ليست توصية.`].join('\n');
   const t = ep.targets[0];
@@ -9317,9 +9579,12 @@ function _scTelegramText(d) {
   } else {
     lines.push(`   📅 لا عقد أسبوعي يجتاز شروط السيولة والعائد حالياً.`);
   }
-  if (d.schools && d.schools.length) {
-    lines.push(``, `🎯 <b>أهداف السهم — كل المدارس:</b>`);
-    d.schools.forEach(s => lines.push(`   ↳ ${s.icon} ${s.school}: ${s.target}$ (+${s.distPct}٪) — ${s.note}`));
+  if (d.schoolData && d.schoolData.hits.length) {
+    const sd = d.schoolData;
+    lines.push(``, `🎯 <b>أهداف السهم — كل المدارس</b> (اتجاه ${sd.dirUp ? 'صاعد' : 'هابط'}${sd.agreement != null ? `، إجماع ${sd.agreement}٪` : ''}):`);
+    sd.hits.forEach(s => lines.push(`   ↳ ${s.icon} ${s.school}: ${s.target}$ (${s.distPct > 0 ? '+' : ''}${s.distPct}٪)${s.stop != null ? ` · وقف ${s.stop}$` : ''} — ${s.note}`));
+    if (sd.consensus) lines.push(`   🎯 إجماع ${sd.consensus.schools.length} مدارس على ${sd.consensus.lo}–${sd.consensus.hi}$`);
+    if (sd.abstained.length) lines.push(`   ◇ امتنعت ${sd.abstained.length}: ${sd.abstained.join(' · ')}`);
   }
   if (ta) {
     lines.push(``, `⏰ <b>التوقيت:</b> ${ta.headline}`);
