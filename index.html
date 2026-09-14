@@ -1427,7 +1427,7 @@ function optEnsureDom() {
   cbar.id = 'optc-bar';
   cbar.style.cssText = 'display:none;padding:8px 12px;border-bottom:1px solid var(--bd);align-items:center;gap:8px;flex-wrap:wrap;background:linear-gradient(135deg,rgba(255,215,0,.09),rgba(34,211,238,.03))';
   cbar.innerHTML = `
-    <button onclick="optScanContracts()" class="scan-btn" style="background:rgba(255,215,0,.16);border:1px solid rgba(255,215,0,.45);color:#FFD700;flex-shrink:0;font-weight:700">🎟️ امسح كل العقود</button>
+    <button onclick="optScanContractsUser()" class="scan-btn" style="background:rgba(255,215,0,.16);border:1px solid rgba(255,215,0,.45);color:#FFD700;flex-shrink:0;font-weight:700">🎟️ امسح كل العقود</button>
     <button onclick="optcStop()" class="scan-btn" style="background:rgba(240,68,88,.1);border:1px solid rgba(240,68,88,.3);color:#f04458;flex-shrink:0">⏹</button>
     <span class="hgroup"><span>💵 ميزانية العقد $</span>
       <input id="optc-budget" type="number" value="1200" step="50" min="20" dir="ltr"
@@ -1449,6 +1449,7 @@ function optEnsureDom() {
       <button class="optc-h" data-h="أسبوعي" onclick="optcSetHorizon('أسبوعي',this)" style="padding:4px 10px;font-size:10px;font-family:inherit;border:none;background:transparent;color:var(--t2);cursor:pointer">📅 أسبوعي</button>
     </div>
     <button onclick="optcToggleAligned(this)" class="scan-btn" style="background:transparent;border:1px solid var(--bd2);color:var(--t2);flex-shrink:0" title="لا يُعرض إلا عقد يوافق اتجاه الشارت ودورته الزمنية">📊 المتوافقة مع الشارت فقط</button>
+    <button id="optc-audit-btn" onclick="optcToggleStrictAudit(this)" class="scan-btn" style="background:rgba(14,207,126,.14);border:1px solid rgba(14,207,126,.4);color:#0ecf7e;flex-shrink:0" title="يرفض العقود كاملةً بلا فوليوم اليوم، بلا عرض شراء حقيقي، بتذبذب ضمني منتفخ، بتعادل غير واقعي، أو على سهم بلا إجماع اتجاهي حاسم — لا يكتفي بخصم نقاط">🛡️ تدقيق صارم</button>
     <span id="optc-prog" style="font-size:10px;color:var(--t2);margin-right:auto;flex:1;min-width:160px">لم يبدأ — اضغط «امسح كل العقود»</span>`;
   wrap.parentElement.insertBefore(cbar, wrap);
 
@@ -8066,6 +8067,18 @@ const OPTC = {
   detail: null,         /* الرمز المفتوحة تفاصيله حالياً، إن وُجد */
   sort: 'best',         /* best | volume | cheap | prob */
   onlyAligned: false,   /* العقود المتوافقة مع الشارت فقط */
+  /* ══ تدقيق العقود الصارم — بوابات قاطعة، لا مجرد خصم نقاط ══
+     المضاربة اليومية والأسبوعية تحديداً لا تحتمل عقداً بلا سوق فعلي
+     اليوم، أو بفارق تسعير يبتلع الحافة، أو باتجاه بلا إجماع فني، أو
+     بتذبذب ضمني منتفخ يجعل انهياره بعد أي حدث يلتهم الربح رغم صحة
+     الاتجاه. هذه بوابات رفض كاملة على مستوى العقد/السهم، لا نقاط تُخصم
+     من تقييم يبقى العقد ظاهراً معها. */
+  strictAudit: true,    /* 🛡️ تشغيل بوابات التدقيق أدناه؛ إيقافها يعيد السلوك القديم (خصم نقاط فقط) */
+  minVolume: 1,         /* أقل فوليوم اليوم — عقد بفوليوم صفر لا سوق فعلي فيه الآن مهما كانت فائدته المفتوحة قديمة */
+  requireBid: true,     /* رفض أي عقد بلا عرض شراء حقيقي (bid=0) — لا يمكن الخروج منه فوراً بسعر حقيقي */
+  maxIvHv: 2.2,          /* رفض تذبذب ضمني يتجاوز 2.2× التذبذب الفعلي — مخاطرة انهيار تذبذب حادة */
+  maxBeVsEm: 2.0,        /* رفض عقد يحتاج تعادله حركة تفوق ضِعف ما يسعّره السوق نفسه حتى الاستحقاق */
+  minAgreement: 70,      /* أقل إجماع اتجاهي (من optDirection) لتقييم عقود السهم أصلاً — أقل من هذا "مقامرة" باتجاه غير حاسم */
   lastAt: null
 };
 
@@ -8174,6 +8187,16 @@ function optChartFit(sym) {
   return out;
 }
 
+/** غلاف زر المسح اليدوي: يعيد ضبط رخصة «الترخية التلقائية» مرة واحدة
+ *  لكل مسح صريح يطلبه المستخدم، حتى لا يعلق المسح على تدقيق مُخفَّف من
+ *  محاولة سابقة بصمت. النداء الداخلي المتكرّر من _optScanFinish نفسه
+ *  يستدعي optScanContracts مباشرة، لا هذا الغلاف، فلا تُعاد الرخصة له. */
+function optScanContractsUser() {
+  OPTC._autoRelaxed = false;
+  return optScanContracts();
+}
+window.optScanContractsUser = optScanContractsUser;
+
 async function optScanContracts() {
   if (OPTC.busy) return;
   OPTC.busy = true; OPTC.cancel = false; OPTC.rows = [];
@@ -8196,7 +8219,7 @@ async function optScanContracts() {
   const rows = [];
   /* محاسبة الترشيح: تُعرض للمستخدم حتى يعرف *لماذا* قلّت العقود بدل أن
      يرى جدولاً قصيراً ويظن أن السوق بلا فرص. */
-  const st = { seen: 0, noPrice: 0, overBudget: 0, thinOI: 0, wideSpread: 0, worthless: 0, badRR: 0, kept: 0, syms: 0 };
+  const st = { seen: 0, noPrice: 0, overBudget: 0, thinOI: 0, wideSpread: 0, worthless: 0, badRR: 0, noVolume: 0, noBid: 0, ivBlowup: 0, beUnrealistic: 0, indecisive: 0, kept: 0, syms: 0 };
   OPTC.stats = st;
   for (let i = 0; i < list.length; i++) {
     if (OPTC.cancel) break;
@@ -8216,7 +8239,7 @@ async function optScanContracts() {
  *  st اختياري: مرِّره من المسح الشامل لتراكم الإحصاء المشترك، أو اتركه
  *  فيُنشأ عدّاد مستقل لاستدعاء منفرد. */
 async function optEvaluateSymbol(sym, stExternal) {
-  const st = stExternal || { seen: 0, noPrice: 0, overBudget: 0, thinOI: 0, wideSpread: 0, worthless: 0, badRR: 0, kept: 0, syms: 0 };
+  const st = stExternal || { seen: 0, noPrice: 0, overBudget: 0, thinOI: 0, wideSpread: 0, worthless: 0, badRR: 0, noVolume: 0, noBid: 0, ivBlowup: 0, beUnrealistic: 0, indecisive: 0, kept: 0, syms: 0 };
   const O = window.KSAEngine?.Options;
   if (!O) return [];
   try {
@@ -8231,6 +8254,19 @@ async function optEvaluateSymbol(sym, stExternal) {
       if (G.demo.has(sym)) return [];
 
       const fit = optChartFit(sym);
+
+      /* ── بوابة التدقيق ①: اتجاه حاسم — قبل تقييم أي عقد لهذا السهم ──
+         optDirection نفسه يقول صراحة في تعليقه: «إجماع ضعيف = لا اتجاه
+         واضح. الأوبشن الاتجاهي هنا مقامرة». هذا كان صحيحاً منذ البداية
+         لكن لم يُطبَّق كبوابة قط — الإجماع كان يُضاف للتقييم فقط (نقاط
+         إضافية أو خصم)، فيمكن لسهم بإجماع 55٪ أن يتصدّر الجدول بفضل
+         سيولة وسعر جيدين رغم أن اتجاهه غير محسوم أصلاً. الآن يُستبعد
+         السهم بالكامل من هذا المسح قبل إهدار طلبات على سلاسله. */
+      if (OPTC.strictAudit && fit.agreement != null && fit.agreement < OPTC.minAgreement) {
+        st.indecisive++;
+        return [];
+      }
+
       /* الاتجاه: من الشارت، أو مفروض من المستخدم */
       const wantCall = OPT.dirChoice === 'auto' ? (fit.dirUp !== false) : OPT.dirChoice === 'call';
 
@@ -8323,6 +8359,17 @@ async function optEvaluateSymbol(sym, stExternal) {
              ومعها «سُلَّم الميزانية» الذي يقول كم عقداً يفتحه كل مستوى. */
           if ((c.openInterest || 0) < OPTC.minOI) { st.thinOI++; continue; }
           if (c.spreadPct != null && c.spreadPct > OPTC.maxSpread) { st.wideSpread++; continue; }
+          /* ── بوابة التدقيق ②: سوق فعلي اليوم لا فائدة مفتوحة قديمة فقط ──
+             الفائدة المفتوحة تتراكم عبر جلسات وتبقى ظاهرة حتى لو لم يتداول
+             أحد العقد اليوم إطلاقاً — بالذات على الأسبوعي القريب من
+             الاستحقاق حيث تُفتح مراكز الأسبوع الماضي ولا تُقفل بعد. عقد
+             بفوليوم صفر لا سوق حيّاً فيه الآن مهما بدت فائدته المفتوحة
+             مطمئنة، وهذا فارق جوهري للمضاربة اليومية تحديداً. */
+          if (OPTC.strictAudit && (c.volume || 0) < OPTC.minVolume) { st.noVolume++; continue; }
+          /* ── بوابة التدقيق ③: سوق ثنائي الاتجاه حقيقي ──
+             bid=0 يعني عدم وجود مشترٍ بأي سعر معلن الآن — الخروج من
+             العقد وقت الحاجة يعتمد على أمل ظهور مشترٍ لا سعر فعلي. */
+          if (OPTC.strictAudit && OPTC.requireBid && !(c.bid > 0)) { st.noBid++; continue; }
 
           /* إعادة تسعير العقد عند هدف السهم ووقفه — لا نسبة من العلاوة.
              🛠️ زمن الحمل كان يلتهم عمر العقد كله فلا يبقى إلا جلسة واحدة،
@@ -8338,12 +8385,26 @@ async function optEvaluateSymbol(sym, stExternal) {
           const gain = tgtPx - c.mid, loss = c.mid - Math.max(0, stpPx);
           const rr = loss > 0.01 ? +(gain / loss).toFixed(2) : null;
           if (rr == null || rr <= 0) { st.badRR++; continue; }
-          st.kept++;
 
           const ivHv = (hv > 0) ? +(c.iv / hv).toFixed(2) : null;
           const em = O.expectedMove(spot, c.iv, O.yearsFromSessions(pk.sess));
           /* هل الحركة المطلوبة للتعادل داخل ما يسعّره السوق أصلاً؟ */
           const beVsEm = (em && em.pct > 0) ? +(c.breakevenMovePct / em.pct).toFixed(2) : null;
+
+          /* ── بوابة التدقيق ④: تذبذب ضمني منتفخ ──
+             عقد مسعَّر لتذبذب أكبر بكثير مما يفعله السهم فعلاً هو أخصب
+             أرض لانهيار التذبذب (IV crush): حتى لو تحرّك السهم في
+             الاتجاه الصحيح، انهيار IV بعد أي حدث يلتهم الربح. سابقاً
+             كان هذا خصم نقاط فقط (-12) فيبقى العقد ظاهراً وقد يتصدّر
+             الجدول بفضل عوامل أخرى قوية. الآن رفض كامل فوق 2.2×. */
+          if (OPTC.strictAudit && ivHv != null && ivHv > OPTC.maxIvHv) { st.ivBlowup++; continue; }
+          /* ── بوابة التدقيق ⑤: نقطة تعادل غير واقعية ──
+             حين تتجاوز الحركة اللازمة للتعادل ضِعف ما يسعّره السوق نفسه
+             حتى الاستحقاق، العقد أقرب لتذكرة يانصيب منه لصفقة مضاربة —
+             نفس المبدأ المُعلن في عمود «تعادل» بالجدول، مطبَّقاً الآن
+             كرفض لا مجرد خصم. */
+          if (OPTC.strictAudit && beVsEm != null && beVsEm > OPTC.maxBeVsEm) { st.beUnrealistic++; continue; }
+          st.kept++;
 
           /* ── التقييم ── */
           let sc = 0;
@@ -8408,15 +8469,22 @@ async function optEvaluateSymbol(sym, stExternal) {
  *  الرئيسية قصيرة ومقروءة بعد فصل جسم تقييم الرمز الواحد عنها. */
 function _optScanFinish(rows, list) {
   const prog = document.getElementById('optc-prog');
-  /* ── ترخية تلقائية ──
+  /* ── ترخية تلقائية — مرة واحدة لكل مسح صريح ──
      جدول فارغ بلا سبب هو أسوأ مخرَج ممكن: يفهمه المستخدم على أنه «لا
-     فرص»، والحقيقة غالباً أن عتبة داخلية ابتلعت كل شيء. إن خرج المجمّع
-     فارغاً تُرخى العتبات مرة واحدة تلقائياً ويُقال ذلك صراحةً. */
-  if (!rows.length && !OPTC.cancel && OPTC.minOI > 10) {
-    OPTC.relaxed = { oi: OPTC.minOI, sp: OPTC.maxSpread };
-    OPTC.minOI = 10; OPTC.maxSpread = 35;
-    const el1 = document.getElementById('optc-oi'); if (el1) el1.value = 10;
-    _radarProgOptc('لا عقد اجتاز العتبات — يُعاد المسح بعتبات مُرخاة تلقائياً…');
+     فرص»، والحقيقة غالباً أن عتبة داخلية (أو التدقيق الصارم الجديد)
+     ابتلعت كل شيء. إن خرج المجمّع فارغاً يُخفَّف التدقيق الصارم أولاً
+     (هو الأكثر قسوة على أسهم أقل سيولة) ثم تُرخى عتبات السيولة، معاً في
+     محاولة واحدة، ويُقال ذلك صراحةً — لا تخمين صامت. */
+  if (!rows.length && !OPTC.cancel && !OPTC._autoRelaxed) {
+    OPTC._autoRelaxed = true;
+    const hadAudit = OPTC.strictAudit;
+    OPTC.relaxed = { oi: OPTC.minOI, sp: OPTC.maxSpread, audit: hadAudit };
+    OPTC.strictAudit = false;
+    OPTC.minOI = Math.min(OPTC.minOI, 10); OPTC.maxSpread = Math.max(OPTC.maxSpread, 35);
+    const el1 = document.getElementById('optc-oi'); if (el1) el1.value = OPTC.minOI;
+    _radarProgOptc(hadAudit
+      ? '⚠️ لا عقد اجتاز التدقيق الصارم — يُعاد المسح بتدقيق مخفَّف وعتبات سيولة مُرخاة تلقائياً…'
+      : 'لا عقد اجتاز العتبات — يُعاد المسح بعتبات مُرخاة تلقائياً…');
     OPTC.busy = false;
     return optScanContracts();
   }
@@ -8450,6 +8518,22 @@ function optcToggleAligned(el) {
   el.style.color = OPTC.onlyAligned ? '#0ecf7e' : 'var(--t2)';
   optRenderContracts();
 }
+/** بوابات التدقيق الصارم تُطبَّق أثناء المسح نفسه (optEvaluateSymbol)
+ *  لا عند العرض — عقد رُفض هناك لا يبقى محفوظاً في OPTC.rows ليُعاد
+ *  إظهاره لاحقاً. لذا لا يكفي إعادة الرسم عند تبديل هذا الزر كما تفعل
+ *  «المتوافقة مع الشارت فقط» أو الترتيب؛ لا بد من مسح جديد فعلياً حتى
+ *  تعكس النتائج الإعداد الجديد بصدق، لا نتائج مسح سابق بإعداد مختلف. */
+function optcToggleStrictAudit(el) {
+  OPTC.strictAudit = !OPTC.strictAudit;
+  el.style.background = OPTC.strictAudit ? 'rgba(14,207,126,.14)' : 'transparent';
+  el.style.borderColor = OPTC.strictAudit ? 'rgba(14,207,126,.4)' : 'var(--bd2)';
+  el.style.color = OPTC.strictAudit ? '#0ecf7e' : 'var(--t2)';
+  if (OPTC.ran && !OPTC.busy) {
+    _radarProgOptc(OPTC.strictAudit ? 'يُعاد المسح بتدقيق صارم…' : 'يُعاد المسح بتدقيق مخفَّف…');
+    optScanContractsUser();
+  }
+}
+window.optcToggleStrictAudit = optcToggleStrictAudit;
 function optcSetHorizon(h, el) {
   OPTC.horizon = h;
   document.querySelectorAll('.optc-h').forEach(b => {
@@ -8620,21 +8704,30 @@ function optRenderContracts() {
       <div style="margin-top:6px;font-size:10.5px;color:var(--t3)">العقد الواحد = ١٠٠ سهم، فالكلفة المعروضة هي ما يُخصم من حسابك فعلاً.</div>
     </div>` : '';
 
+  const auditOn = OPTC.strictAudit;
   const stLine = st ? `<div style="margin-top:12px;font-size:11px;color:var(--t2);line-height:1.95;text-align:right;max-width:560px;margin-inline:auto;background:var(--c2);border:1px solid var(--bd);border-radius:8px;padding:10px 13px">
-      <b style="color:#FFD700">أين ذهبت العقود؟</b> فُحص <b>${st.seen}</b> عقداً${st.seen === 0 ? ' — <span style="color:#f04458">أي أن السلاسل لم تصل أصلاً، فالمشكلة في الجلب لا في الترشيح</span>' : ''}:
-      <div style="margin-top:5px">• <b>${st.thinOI}</b> بفائدة مفتوحة دون ${OPTC.minOI}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:2px">
+        <span><b style="color:#FFD700">أين ذهبت العقود؟</b> فُحص <b>${st.seen}</b> عقداً${st.seen === 0 ? ' — <span style="color:#f04458">أي أن السلاسل لم تصل أصلاً، فالمشكلة في الجلب لا في الترشيح</span>' : ''}:</span>
+        <span style="font-size:10px;font-weight:700;color:${auditOn ? '#0ecf7e' : '#f5c842'}">${auditOn ? '🛡️ التدقيق الصارم مفعَّل' : '⚠️ التدقيق الصارم مُخفَّف'}</span>
+      </div>
+      <div style="margin-top:5px">• <b>${st.indecisive}</b> رمز استُبعد كاملاً — اتجاه غير حاسم (إجماع دون ${OPTC.minAgreement}٪)</div>
+      <div>• <b>${st.thinOI}</b> بفائدة مفتوحة دون ${OPTC.minOI}</div>
       <div>• <b>${st.wideSpread}</b> بفارق عرض/طلب فوق ${OPTC.maxSpread}٪</div>
+      <div>• <b>${st.noVolume}</b> بفوليوم صفري اليوم — لا سوق فعلي رغم فائدته المفتوحة</div>
+      <div>• <b>${st.noBid}</b> بلا عرض شراء حقيقي (bid=0) — لا خروج فوري بسعر حقيقي</div>
       <div>• <b>${st.worthless}</b> ينتهي بلا قيمة عند هدف السهم (بعيد عن النقد)</div>
       <div>• <b>${st.badRR}</b> بعائد غير موجب عند هدف السهم</div>
+      <div>• <b>${st.ivBlowup}</b> بتذبذب ضمني منتفخ فوق ${OPTC.maxIvHv}× المُحقَّق — مخاطرة انهيار تذبذب</div>
+      <div>• <b>${st.beUnrealistic}</b> بتعادل يفوق ${OPTC.maxBeVsEm}× الحركة التي يسعّرها السوق</div>
       <div>• <b>${st.noPrice}</b> بلا تسعير صالح</div>
-      <div style="margin-top:5px;color:#0ecf7e">• <b>${st.kept}</b> اجتاز كل الشروط</div>
+      <div style="margin-top:5px;color:#0ecf7e">• <b>${st.kept}</b> اجتاز كل الشروط${auditOn ? ' (بالتدقيق الصارم)' : ''}</div>
     </div>` : '';
 
   if (!rows.length) {
     panel.innerHTML = `<div style="padding:24px;text-align:center;color:var(--t3);font-size:12px;line-height:2">
       ${OPTC.busy ? 'جارٍ تقييم السلاسل…' : OPTC.ran
         ? `لا عقد ضمن ميزانية <b style="color:#FFD700">${OPTC.budget}$</b> بسيولة ≥ ${OPTC.minOI} عقد مفتوح.<br>
-           <span style="font-size:11px">ارفع الميزانية أو اخفض حدّ السيولة${OPTC.onlyAligned ? '، أو ألغِ «المتوافقة مع الشارت فقط»' : ''}.</span>`
+           <span style="font-size:11px">ارفع الميزانية أو اخفض حدّ السيولة${OPTC.onlyAligned ? '، أو ألغِ «المتوافقة مع الشارت فقط»' : ''}${OPTC.strictAudit ? '، أو خفّف «🛡️ تدقيق صارم»' : ''}.</span>`
         : 'اضغط <b style="color:#FFD700">«🎟️ امسح كل العقود»</b> أعلاه.'}
       ${ladderLine}
       ${stLine}
@@ -8659,7 +8752,7 @@ function optRenderContracts() {
   panel.innerHTML = `
     <div style="background:rgba(255,215,0,.05);border:1px solid rgba(255,215,0,.22);border-radius:9px;padding:10px 13px;margin-bottom:11px;font-size:11px;line-height:1.9;color:var(--t2)">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:5px">
-        <span><b style="color:#FFD700">${rows.length} عقد</b> — عقد واحد لكل سهم، الأقوى فقط، من ${pool.length} عقداً اجتاز السيولة والعائد ضمن ميزانية <b style="color:#FFD700">${OPTC.budget}$</b>.</span>
+        <span><b style="color:#FFD700">${rows.length} عقد</b> — عقد واحد لكل سهم، الأقوى فقط، من ${pool.length} عقداً اجتاز السيولة والعائد ضمن ميزانية <b style="color:#FFD700">${OPTC.budget}$</b>${auditOn ? ' <span style="color:#0ecf7e" title="فوليوم اليوم حقيقي، عرض شراء حقيقي، تذبذب ضمني معقول، تعادل واقعي، وسهمه بإجماع اتجاهي حاسم">🛡️ وتدقيقاً صارماً</span>' : ''}.</span>
         <span style="font-size:10.5px;font-weight:700">${freshLine}</span>
       </div>
       اضغط أي صف ليفتح <b>شارت السهم</b> في اللوحة المجاورة و<b>بطاقة التفصيل</b> أسفل الجدول.
